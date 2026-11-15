@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><TargetFramework>net472</TargetFramework><OutputType>Exe</OutputType><AssemblyName>ForestPerformance.Tests</AssemblyName><LangVersion>latest</LangVersion><Nullable>enable</Nullable><GenerateAssemblyInfo>false</GenerateAssemblyInfo><EnableDefaultCompileItems>false</EnableDefaultCompileItems><GamePath Condition="'$(GamePath)' == ''">$(ATT_GAME_PATH)</GamePath></PropertyGroup>
+  <ItemGroup><Compile Include="Program.cs"/><Compile Include="LoadingTests.cs"/><Compile Include="InstructionBatchingTests.cs"/><Compile Include="ConnectivityTests.cs"/><Compile Include="GateContextTests.cs"/><ProjectReference Include="../ForestPerformance.csproj"/></ItemGroup>
+  <ItemGroup>
+    <Reference Include="0Harmony"><HintPath>$(GamePath)/MelonLoader/net35/0Harmony.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="MelonLoader"><HintPath>$(GamePath)/MelonLoader/net35/MelonLoader.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Root.Township"><HintPath>$(GamePath)/A Township Tale_Data/Managed/Root.Township.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Alta.Values"><HintPath>$(GamePath)/A Township Tale_Data/Managed/Alta.Values.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Alta.Serialization.Runtime"><HintPath>$(GamePath)/A Township Tale_Data/Managed/Alta.Serialization.Runtime.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.CoreModule"><HintPath>$(GamePath)/A Township Tale_Data/Managed/UnityEngine.CoreModule.dll</HintPath><Private>false</Private></Reference>
+  </ItemGroup>
+</Project>

@@ -1,0 +1,8 @@
+# Forest Performance 0.2.0; startup settings.
+enabled=true
+navigation_fixes=true
+reset_fixes=true
+forest_step_diagnostics=true
+connectivity_updates=true
+forest_instructions_per_frame=1
+separate_entity_loads=true

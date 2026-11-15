@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><TargetFramework>net472</TargetFramework><LangVersion>latest</LangVersion><Nullable>enable</Nullable><GenerateAssemblyInfo>false</GenerateAssemblyInfo><EnableDefaultCompileItems>false</EnableDefaultCompileItems><GamePath Condition="'$(GamePath)' == ''">$(ATT_GAME_PATH)</GamePath></PropertyGroup>
+  <ItemGroup><Compile Include="Core.cs"/><Compile Include="Settings.cs"/><Compile Include="Loading.cs"/><Compile Include="ForestInstructionBatching.cs"/><Compile Include="Connectivity.cs"/><Compile Include="Modules.cs"/><Compile Include="TestAccess.cs"/><Compile Include="Modules/**/*.cs"/></ItemGroup>
+  <ItemGroup>
+    <Reference Include="0Harmony"><HintPath>$(GamePath)/MelonLoader/net35/0Harmony.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="MelonLoader"><HintPath>$(GamePath)/MelonLoader/net35/MelonLoader.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Root.Township"><HintPath>$(GamePath)/A Township Tale_Data/Managed/Root.Township.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Township.Core.Runtime"><HintPath>$(GamePath)/A Township Tale_Data/Managed/Township.Core.Runtime.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Alta.Core.Runtime"><HintPath>$(GamePath)/A Township Tale_Data/Managed/Alta.Core.Runtime.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Alta.Build"><HintPath>$(GamePath)/A Township Tale_Data/Managed/Alta.Build.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Alta.Values"><HintPath>$(GamePath)/A Township Tale_Data/Managed/Alta.Values.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Alta.IO"><HintPath>$(GamePath)/A Township Tale_Data/Managed/Alta.IO.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Alta.Serialization.Runtime"><HintPath>$(GamePath)/A Township Tale_Data/Managed/Alta.Serialization.Runtime.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.PhysicsModule"><HintPath>$(GamePath)/A Township Tale_Data/Managed/UnityEngine.PhysicsModule.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.CoreModule"><HintPath>$(GamePath)/A Township Tale_Data/Managed/UnityEngine.CoreModule.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Alta.Singletons"><HintPath>$(GamePath)/A Township Tale_Data/Managed/Alta.Singletons.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.TerrainModule"><HintPath>$(GamePath)/A Township Tale_Data/Managed/UnityEngine.TerrainModule.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Newtonsoft.Json"><HintPath>$(GamePath)/A Township Tale_Data/Managed/Newtonsoft.Json.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="netstandard"><HintPath Condition="Exists('/usr/lib/mono/4.8-api/Facades/netstandard.dll')">/usr/lib/mono/4.8-api/Facades/netstandard.dll</HintPath><Private>false</Private></Reference>
+  </ItemGroup>
+</Project>

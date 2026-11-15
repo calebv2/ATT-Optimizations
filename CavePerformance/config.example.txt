@@ -1,0 +1,14 @@
+# Cave Performance 0.2.1; startup settings.
+enabled=true
+path_workers=2
+cave_local_search=true
+generation_ms=4
+separate_entity_loads=true
+fine_timing=true
+cave_wyrm_multiplier=0.75
+navigation_recovery=true
+cave_step_diagnostics=true
+pathfinding_queue_diagnostics=true
+mob_combat_diagnostics=true
+cave_diagnostic_min_layer=90
+async_cave_scan_start=true
