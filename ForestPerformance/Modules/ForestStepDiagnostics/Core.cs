@@ -49,7 +49,7 @@ namespace ForestStepDiagnostics
                     catch (Exception e) { File.AppendAllText(hookFile, ServerTrace.Row(spec.Stage, "unavailable", e.GetType().Name + ": " + e.Message) + "\n"); }
                 }
                 FineProbe.Install(root, harmony, hookFile);
-                File.WriteAllText(Path.Combine(dir, "run.txt"), "Forest Step Diagnostics 0.2.0\nThreshold 25 ms inclusive wall time. Each async MoveNext invocation excludes await time and is not total task latency.\nFine timings are scoped to forest terrain steps or forest-specific sort workers. Scope IDs are thread-local and never propagate across awaits or worker threads.\nRows may overlap nested methods or other diagnostics. Chunk identifiers and state are captured before each step; chunk may be unavailable. Main thread is unknown until first OnUpdate. No Unity property is accessed for context.\n");
+                File.WriteAllText(Path.Combine(dir, "run.txt"), "Forest Step Diagnostics 0.2.1\nThreshold 25 ms inclusive wall time. Each async MoveNext invocation excludes await time and is not total task latency.\nFine timings are scoped to forest terrain steps or forest-specific sort workers. Scope IDs are thread-local and never propagate across awaits or worker threads.\nRows may overlap nested methods or other diagnostics. Chunk identifiers and state are captured before each step; chunk may be unavailable. Main thread is unknown until first OnUpdate. No Unity property is accessed for context.\n");
                 LoggerInstance.Msg("Forest step diagnostics initialized; check hooks.csv: " + dir);
             }
             catch (Exception e) { LoggerInstance.Error("Forest step diagnostics unavailable: " + e); OnApplicationQuit(); }

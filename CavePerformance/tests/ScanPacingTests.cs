@@ -71,11 +71,16 @@ internal static class ScanPacingTests
     }
     private sealed class RecoveryHost : IScanHost
     {
+        internal int OriginalStarts;
         public bool Alive => true;
         public double Now => 0;
         public object? Graph => null;
         public bool Scanning => false;
-        public IEnumerator CreateOriginal() => throw new NotSupportedException();
+        public IEnumerator CreateOriginal()
+        {
+            OriginalStarts++;
+            return new[] { "native graph registered" }.GetEnumerator();
+        }
         public void RemoveIncompleteGraph(object graph) => throw new NotSupportedException();
         public void Log(string text) { }
     }
@@ -85,9 +90,42 @@ internal static class ScanPacingTests
     internal static void Run()
     {
         ScanPacing.Bind();
-        Lifecycle(); NativeOwnership(); Attachment();
+        Lifecycle(); ExistingGraphWork(); NativeOwnership(); Attachment();
         Check(ScanPacing.PendingCount == 0, "Warmup fixture retained a pending pause lease");
         Console.WriteLine("PASS asynchronous cave scan start: frame-yielded receiver warmup, bounded timeout/cancel/shutdown, native progress and exception identity, exact-once owned lease cleanup, no-worker fallback, actual native lock handoff preserving external owners, scoped factory attachment and rollback.");
+    }
+    private static void ExistingGraphWork()
+    {
+        bool graphWork = true;
+        double time = 0;
+        var host = new RecoveryHost();
+        var state = new ScanState();
+        var preflight = new ScanPacing.GraphPreflight();
+        using (var iterator = new ScanRecovery(host, state, () => preflight.Defer(graphWork, time)))
+        {
+            Check(iterator.MoveNext() && iterator.Current == null, "Already queued work was forced into a new cave scan");
+            Check(host.OriginalStarts == 0 && state.Attempts == 0, "Preflight started graph allocation while existing work was busy");
+            time = 20;
+            graphWork = false;
+            Check(iterator.MoveNext() && (string?)iterator.Current == "native graph registered", "Settled graph work did not permit native scan");
+            Check(host.OriginalStarts == 1 && state.Attempts == 1, "Settled preflight did not hand off the original scan");
+        }
+        host = new RecoveryHost(); state = new ScanState(); preflight = new ScanPacing.GraphPreflight();
+        long timeouts = ScanPacing.GraphWorkTimeouts;
+        using (var iterator = new ScanRecovery(host, state, () => preflight.Defer(true, time)))
+        {
+            Check(iterator.MoveNext() && host.OriginalStarts == 0, "Busy graph did not defer the first cave scan step");
+            time += 1000;
+            Check(iterator.MoveNext() && host.OriginalStarts == 1 && ScanPacing.GraphWorkTimeouts == timeouts + 1, "Graph work deadline stranded a cave scan");
+        }
+        host = new RecoveryHost(); state = new ScanState(); preflight = new ScanPacing.GraphPreflight();
+        using (var iterator = new ScanRecovery(host, state, () => preflight.Defer(true, time)))
+        {
+            Check(iterator.MoveNext() && host.OriginalStarts == 0, "Cancellation fixture already allocated its graph");
+            iterator.Dispose();
+            Check(!iterator.MoveNext() && host.OriginalStarts == 0 && state.Owner == null, "Preflight cancellation allocated a graph or retained its cave");
+        }
+        Console.WriteLine("PASS cave scan graph-work preflight: yields before native graph registration or pause acquisition, proceeds after existing work, one-second deadline, cancellation before registration.");
     }
     private static void Lifecycle()
     {
@@ -168,6 +206,9 @@ internal static class ScanPacingTests
         var source = new Source { OnFirst = () => { Check(host.Ready, "Native step ran before receiver acknowledgement"); native = processor.PausePathfinding(false); } };
         try
         {
+            var astar = (AstarPath)FormatterServices.GetUninitializedObject(typeof(AstarPath));
+            typeof(AstarPath).GetField("workItemLock", Any)!.SetValue(astar, external);
+            Check(ScanPacing.HasGraphWork(astar), "A queued native work-item lock was not visible before processing started");
             using (var iterator = ScanPacing.Wrap(source, () => host, () => true).GetEnumerator())
             {
                 Check(iterator.MoveNext() && source.Moves == 0, "Actual native queue did not wait for both receivers");

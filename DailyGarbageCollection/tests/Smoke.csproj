@@ -1,0 +1,5 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><TargetFramework>net472</TargetFramework><OutputType>Exe</OutputType><LangVersion>latest</LangVersion><Nullable>enable</Nullable><GenerateAssemblyInfo>false</GenerateAssemblyInfo><EnableDefaultCompileItems>false</EnableDefaultCompileItems></PropertyGroup>
+  <ItemGroup><Compile Include="Program.cs" /><Compile Include="../Patch.cs" Link="Patch.cs" /><Compile Include="../DailySchedule.cs" Link="DailySchedule.cs" /></ItemGroup>
+  <ItemGroup><Reference Include="0Harmony"><HintPath>$(ATT_GAME_PATH)/MelonLoader/net35/0Harmony.dll</HintPath><Private>false</Private></Reference></ItemGroup>
+</Project>

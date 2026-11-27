@@ -1,4 +1,4 @@
-# Cave Performance 0.2.1; startup settings.
+# Cave Performance 0.2.5 startup settings.
 enabled=true
 path_workers=2
 cave_local_search=true
@@ -6,6 +6,7 @@ generation_ms=4
 separate_entity_loads=true
 fine_timing=true
 cave_wyrm_multiplier=0.75
+cave_turabada_multiplier=1
 navigation_recovery=true
 cave_step_diagnostics=true
 pathfinding_queue_diagnostics=true

@@ -1,6 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup><TargetFramework>net472</TargetFramework><LangVersion>latest</LangVersion><Nullable>enable</Nullable><GenerateAssemblyInfo>false</GenerateAssemblyInfo><EnableDefaultCompileItems>false</EnableDefaultCompileItems><GamePath Condition="'$(GamePath)' == ''">$(ATT_GAME_PATH)</GamePath></PropertyGroup>
-  <ItemGroup><Compile Include="Core.cs"/><Compile Include="Settings.cs"/><Compile Include="Search.cs"/><Compile Include="ScanPacing.cs"/><Compile Include="Loading.cs"/><Compile Include="Timing.cs"/><Compile Include="WyrmPopulation.cs"/><Compile Include="ServerTrace.cs"/><Compile Include="Modules.cs"/><Compile Include="TestAccess.cs"/><Compile Include="Modules/**/*.cs"/></ItemGroup>
+  <ItemGroup><Compile Include="Core.cs"/><Compile Include="Settings.cs"/><Compile Include="Search.cs"/><Compile Include="ScanPacing.cs"/><Compile Include="Loading.cs"/><Compile Include="Timing.cs"/><Compile Include="LoadTransitionTiming.cs"/><Compile Include="CavePopulationTargets.cs"/><Compile Include="ServerTrace.cs"/><Compile Include="Modules.cs"/><Compile Include="TestAccess.cs"/><Compile Include="Modules/**/*.cs"/><Compile Include="../PerformanceCompatibility/CompatibilityReport.cs" Link="Support/CompatibilityReport.cs"/><Compile Include="../PerformanceCompatibility/RuntimeSnapshot.cs" Link="Support/RuntimeSnapshot.cs"/></ItemGroup>
   <ItemGroup>
     <Reference Include="0Harmony"><HintPath>$(GamePath)/MelonLoader/net35/0Harmony.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="MelonLoader"><HintPath>$(GamePath)/MelonLoader/net35/MelonLoader.dll</HintPath><Private>false</Private></Reference>
@@ -13,6 +13,6 @@
     <Reference Include="Alta.Serialization.Runtime"><HintPath>$(GamePath)/A Township Tale_Data/Managed/Alta.Serialization.Runtime.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="UnityEngine.PhysicsModule"><HintPath>$(GamePath)/A Township Tale_Data/Managed/UnityEngine.PhysicsModule.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="UnityEngine.CoreModule"><HintPath>$(GamePath)/A Township Tale_Data/Managed/UnityEngine.CoreModule.dll</HintPath><Private>false</Private></Reference>
-    <Reference Include="netstandard"><HintPath Condition="Exists('/usr/lib/mono/4.8-api/Facades/netstandard.dll')">/usr/lib/mono/4.8-api/Facades/netstandard.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="netstandard"><HintPath>/usr/lib/mono/4.8-api/Facades/netstandard.dll</HintPath><Private>false</Private></Reference>
   </ItemGroup>
 </Project>

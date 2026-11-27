@@ -5,9 +5,11 @@ cd "$(dirname "$0")"
 export ATT_GAME_PATH
 export ATT_CAVE_PERFORMANCE_DLL="$PWD/bin/Release/net472/CavePerformance.dll"
 export ATT_FOREST_PERFORMANCE_DLL="${ATT_FOREST_PERFORMANCE_DLL:-$PWD/../ForestPerformance/bin/Release/net472/ForestPerformance.dll}"
+export ATT_DAILY_GC_DLL="$PWD/../DailyGarbageCollection/bin/Release/net472/DailyGarbageCollection.dll"
 dotnet_path="${DOTNET_BIN:-dotnet}"
 "$dotnet_path" build CavePerformance.csproj -c Release --nologo "-p:GamePath=$ATT_GAME_PATH"
 "$dotnet_path" build ../ForestPerformance/ForestPerformance.csproj -c Release --nologo "-p:GamePath=$ATT_GAME_PATH"
+"$dotnet_path" build ../DailyGarbageCollection/DailyGarbageCollection.csproj -c Release --nologo "-p:GamePath=$ATT_GAME_PATH"
 "$dotnet_path" build tests/Tests.csproj -c Release --nologo "-p:GamePath=$ATT_GAME_PATH"
 test_deps="$(mktemp -d)"
 trap 'rm -rf "$test_deps"' EXIT

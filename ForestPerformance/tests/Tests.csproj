@@ -1,6 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup><TargetFramework>net472</TargetFramework><OutputType>Exe</OutputType><AssemblyName>ForestPerformance.Tests</AssemblyName><LangVersion>latest</LangVersion><Nullable>enable</Nullable><GenerateAssemblyInfo>false</GenerateAssemblyInfo><EnableDefaultCompileItems>false</EnableDefaultCompileItems><GamePath Condition="'$(GamePath)' == ''">$(ATT_GAME_PATH)</GamePath></PropertyGroup>
-  <ItemGroup><Compile Include="Program.cs"/><Compile Include="LoadingTests.cs"/><Compile Include="InstructionBatchingTests.cs"/><Compile Include="ConnectivityTests.cs"/><Compile Include="GateContextTests.cs"/><ProjectReference Include="../ForestPerformance.csproj"/></ItemGroup>
+  <ItemGroup><Compile Include="Program.cs"/><Compile Include="LoadingTests.cs"/><Compile Include="InstructionBatchingTests.cs"/><Compile Include="ConnectivityTests.cs"/><Compile Include="GateContextTests.cs"/><Compile Include="RewriteTerrainTests.cs"/><Compile Include="PrefabCleanupTests.cs"/><ProjectReference Include="../ForestPerformance.csproj"/></ItemGroup>
   <ItemGroup>
     <Reference Include="0Harmony"><HintPath>$(GamePath)/MelonLoader/net35/0Harmony.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="MelonLoader"><HintPath>$(GamePath)/MelonLoader/net35/MelonLoader.dll</HintPath><Private>false</Private></Reference>

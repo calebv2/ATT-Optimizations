@@ -8,10 +8,11 @@ using System.Threading;
 using HarmonyLib;
 using MelonLoader;
 using UnityEngine;
+using ATT.PerformanceCompatibility;
 
-[assembly: MelonInfo(typeof(CavePerformance.Core), "Cave Performance", "0.2.1", "ATT", null)]
+[assembly: MelonInfo(typeof(CavePerformance.Core), "Cave Performance", "0.2.5", "ATT", null)]
 [assembly: MelonGame("Alta", "A Township Tale")]
-[assembly: AssemblyVersion("0.2.1.0")]
+[assembly: AssemblyVersion("0.2.5.0")]
 [assembly: InternalsVisibleTo("CavePerformance.Tests")]
 
 namespace CavePerformance
@@ -31,6 +32,7 @@ namespace CavePerformance
         internal static double TransitionUntil;
         internal static ServerTrace? Trace;
         private HarmonyLib.Harmony? harmony;
+        private HarmonyLib.Harmony? loadTimingHarmony;
         private readonly Support.ModuleGroup modules = new Support.ModuleGroup();
         private double nextReport;
         internal static double Now => Clock.Elapsed.TotalMilliseconds;
@@ -57,16 +59,17 @@ namespace CavePerformance
         internal static void Bind()
         {
             if (typeof(AstarPath).Module.ModuleVersionId != SupportedMvid) throw new NotSupportedException("Unsupported game assembly");
-            Search.Bind(); ScanPacing.Bind(); Loading.Bind(); Timing.Bind(); WyrmPopulation.Bind();
+            Search.Bind(); ScanPacing.Bind(); Loading.Bind(); Timing.Bind(); CavePopulationTargets.Bind();
         }
         internal static void Attach(HarmonyLib.Harmony h)
         {
-            Search.Attach(h); ScanPacing.Attach(h); Loading.Attach(h); Timing.Attach(h); WyrmPopulation.Attach(h);
+            Search.Attach(h); ScanPacing.Attach(h); Loading.Attach(h); Timing.Attach(h); CavePopulationTargets.Attach(h);
         }
         public override void OnInitializeMelon()
         {
             if (!Application.isBatchMode) return;
             MainThread = Thread.CurrentThread.ManagedThreadId;
+            MelonEvents.OnApplicationLateStart.Subscribe(ReportCompatibility);
             try
             {
                 string directory = Path.Combine(Path.GetDirectoryName(Application.dataPath)!, "UserData", "CavePerformance");
@@ -81,23 +84,49 @@ namespace CavePerformance
                 if (Config.Timing) Trace = new ServerTrace(Path.Combine(directory, DateTime.UtcNow.ToString("yyyyMMddTHHmmssfffZ"), "timing.csv"),
                     "utc,mono_ms,stage,duration_ms,thread_id,detail,exception_type,dropped_rows");
                 Ready = true;
+                if (Config.Timing)
+                {
+                    loadTimingHarmony = new HarmonyLib.Harmony("ATT.CavePerformance.LoadTransitionTiming");
+                    try { LoadTransitionTiming.Bind(); LoadTransitionTiming.Attach(loadTimingHarmony); }
+                    catch (Exception timingError)
+                    {
+                        LoadTransitionTiming.Ready = false;
+                        loadTimingHarmony.UnpatchSelf();
+                        LoggerInstance.Warning("Cave transition timing unavailable: " + timingError.Message);
+                    }
+                }
                 if (Config.NavigationRecovery) modules.Start(new CaveNavigationRecovery.Core(), LoggerInstance, directory);
                 if (Config.StepDiagnostics) modules.Start(new CaveStepDiagnostics.Core(), LoggerInstance, directory);
                 if (Config.QueueDiagnostics) modules.Start(new PathfindingQueueDiagnostics.Core(), LoggerInstance, directory);
                 if (Config.MobDiagnostics) modules.Start(new MobCombatDiagnostics.Core(), LoggerInstance, directory);
-                LoggerInstance.Msg("READY v0.2.1; explicit walker owner binding and rejection counters; path_workers=" + Config.Workers + "; cave_local_search=" + Config.LocalSearch +
+                LoggerInstance.Msg("READY v0.2.5; fair cave render turns and native graph work preflight; path_workers=" + Config.Workers + "; cave_local_search=" + Config.LocalSearch +
                     "; generation_ms=" + Config.GenerationMs + "; separate_entity_loads=" + Config.SeparateLoads +
-                    "; fine_timing=" + Config.Timing + "; cave_wyrm_multiplier=" + Config.WyrmMultiplier + ". Native entity restore batches remain atomic; budgets cannot interrupt a native call. Activation is at startup; GC policy unchanged.");
+                    "; fine_timing=" + Config.Timing + "; cave_wyrm_multiplier=" + F(Config.WyrmMultiplier) +
+                    "; cave_turabada_multiplier=" + F(Config.TurabadaMultiplier) +
+                    ". Native entity restore batches remain atomic; budgets cannot interrupt a native call. Activation is at startup; GC policy unchanged.");
             }
             catch (Exception e)
             {
                 Ready = false;
+                LoadTransitionTiming.Ready = false; loadTimingHarmony?.UnpatchSelf();
                 ScanPacing.Shutdown();
+                Loading.ClearRenderQueue();
                 modules.Stop();
                 try { harmony?.UnpatchSelf(); } catch (Exception rollback) { LoggerInstance.Error("Rollback: " + rollback); }
                 Trace?.Dispose(); Trace = null;
                 LoggerInstance.Error("Cave Performance DISABLED: " + e);
             }
+        }
+        private void ReportCompatibility()
+        {
+            StartupReport.WriteOnce("Cave Performance", message => LoggerInstance.Msg(message),
+                new FeatureStatus("core cave fixes", Config.Enabled, Ready, "path_workers=" + Config.Workers +
+                    ";wyrm_multiplier=" + F(Config.WyrmMultiplier) + ";turabada_multiplier=" + F(Config.TurabadaMultiplier)),
+                new FeatureStatus("procedural and static cave recovery", Config.NavigationRecovery, CaveNavigationRecovery.Core.Ready,
+                    "verified navigation completion; original caller exception policy retained"),
+                new FeatureStatus("fair cave render budget", Config.GenerationMs > 0, Ready && Config.GenerationMs > 0),
+                new FeatureStatus("nonblocking scan preparation", Config.AsyncScanStart && Config.NavigationRecovery, Ready && CaveNavigationRecovery.Core.Ready && Config.AsyncScanStart),
+                new FeatureStatus("load phase timing", Config.Timing, LoadTransitionTiming.Ready));
         }
         public override void OnUpdate()
         {
@@ -108,17 +137,20 @@ namespace CavePerformance
             nextReport = Now + 60000;
             Row("health", 0, "workers_configured=" + Config.Workers + ";workers_actual=" + Search.ActualWorkers() + ";scoped_queries=" + Interlocked.Read(ref Search.ScopedQueries) +
                 ";fallbacks=" + Interlocked.Read(ref Search.Fallbacks) + ";native_load_batches_released=" + Loading.Released +
-                ";pending_load_gates=" + Loading.Pending + ";wyrm_target_reductions=" + Interlocked.Read(ref WyrmPopulation.Reduced) +
+                ";pending_load_gates=" + Loading.Pending + ";native_load_batches_drained=" + Loading.Drained +
+                ";personal_cleanup_drain_bypasses=" + Loading.PersonalCleanupBypasses + ";wyrm_target_reductions=" + Interlocked.Read(ref CavePopulationTargets.WyrmReduced) +
+                ";turabada_target_reductions=" + Interlocked.Read(ref CavePopulationTargets.TurabadaReduced) +
                 ";" + Search.Health() +
-                ScanPacing.Health() + ";load_context_fallbacks=" + Loading.ContextFallbacks + ";load_offthread_drain_deferred=" + Loading.OffThreadDrainDeferred +
+                ScanPacing.Health() + Loading.RenderHealth() + ";load_context_fallbacks=" + Loading.ContextFallbacks + ";load_offthread_drain_deferred=" + Loading.OffThreadDrainDeferred +
+                ";" + CaveNavigationRecovery.Core.Health() +
                 ";errors=" + Interlocked.Read(ref Errors) + ";rate_limited=" + Interlocked.Read(ref Limited) + ";writer_error=" + Trace?.Error);
         }
         public override void OnApplicationQuit()
         {
             // Complete queued gates before detaching, so an awaiting native
             // loader is never abandoned solely because this mod shuts down.
-            Ready = false; ScanPacing.Shutdown(); Loading.Drain(); modules.Stop();
-            harmony?.UnpatchSelf(); Trace?.Dispose(); Trace = null;
+            Ready = false; LoadTransitionTiming.Ready = false; ScanPacing.Shutdown(); Loading.ClearRenderQueue(); Loading.Drain(); modules.Stop();
+            loadTimingHarmony?.UnpatchSelf(); harmony?.UnpatchSelf(); Trace?.Dispose(); Trace = null;
         }
     }
 }

@@ -49,7 +49,7 @@ internal sealed class FakeNavigator
     internal Action? FailureCallback;
     [MethodImpl(MethodImplOptions.NoInlining)] public void Fail(object path) { FailureCallback?.Invoke(); }
 }
-internal static class Tests
+internal static partial class Tests
 {
     private static void Check(bool value, string message) => Host.Check(value, message);
     private static void Drive(ScanRecovery iterator, Host host)
@@ -122,19 +122,20 @@ internal static class Tests
         string hooks = Path.GetTempFileName();
         try
         {
-            Assembly dailyAssembly = Assembly.LoadFrom(game + "Mods/DailyGarbageCollection.dll");
+            Assembly dailyAssembly = Assembly.LoadFrom(Environment.GetEnvironmentVariable("ATT_DAILY_GC_DLL")!);
             var patch = dailyAssembly.GetType("DailyGarbageCollection.Patch", true)!;
             daily.Patch(Core.ScanStep, transpiler: new HarmonyMethod(patch, "ReplaceScanCollect"));
             Assembly caveAssembly = typeof(CaveNavigationRecovery.Core).Assembly;
             caveAssembly.GetType("CaveStepDiagnostics.PathProbe", true)!.GetMethod("AttachAll", BindingFlags.Static | BindingFlags.NonPublic)!.Invoke(null, new object[] { root, cave, hooks });
             Check(File.ReadAllLines(hooks).Skip(1).All(x => x.Contains(",attached,")), "cave hooks failed");
             Core.Attach(recovery);
-            foreach (var target in new[] { Core.Generate, Core.Need, Core.ScanStep, Core.Wander, Core.Failure, Core.Cancel })
+            StaticHookTests(recovery, root);
+            foreach (var target in new[] { Core.Generate, Core.Need, Core.ScanStep, Core.Wander, Core.Failure, Core.Cancel, Core.StaticGenerate, Core.StaticLoad })
                 Check(HarmonyLib.Harmony.GetPatchInfo(target).Owners.Contains(recovery.Id), "attachment missing: " + target.Name);
             Check(HarmonyLib.Harmony.GetPatchInfo(Core.ScanStep).Owners.Contains(daily.Id) && HarmonyLib.Harmony.GetPatchInfo(Core.ScanStep).Owners.Contains(cave.Id), "existing scan patches missing");
             recovery.UnpatchSelf();
             Check(HarmonyLib.Harmony.GetPatchInfo(Core.ScanStep).Owners.Contains(daily.Id) && HarmonyLib.Harmony.GetPatchInfo(Core.ScanStep).Owners.Contains(cave.Id), "rollback removed other mods");
-            Console.WriteLine("PASS installed game metadata and six Harmony targets attach alongside actual daily GC transpiler and cave diagnostics; rollback preserves both owners. Unity game methods not executed.");
+            Console.WriteLine("PASS installed game metadata and eight Harmony targets attach alongside actual daily GC transpiler and cave diagnostics; rollback preserves both owners. Unity game methods not executed.");
         }
         finally { recovery.UnpatchSelf(); daily.UnpatchSelf(); cave.UnpatchSelf(); File.Delete(hooks); }
     }
@@ -173,5 +174,5 @@ internal static class Tests
             patcher.UnpatchSelf(); preparing.SetValue(null, oldPreparing); requesting.SetValue(null, oldRequesting); thread.SetValue(null, oldThread);
         }
     }
-    private static void Main() { ScanTests(); WanderTests(); FailureHookTests(); AttachmentTests(); }
+    private static void Main() { ScanTests(); AdmissionLifecycleTests(); StaticCompletionTests(); WanderTests(); FailureHookTests(); AttachmentTests(); }
 }

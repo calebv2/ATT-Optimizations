@@ -1,7 +1,11 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup><TargetFramework>net472</TargetFramework><LangVersion>latest</LangVersion><Nullable>enable</Nullable><GenerateAssemblyInfo>false</GenerateAssemblyInfo><EnableDefaultCompileItems>false</EnableDefaultCompileItems><GamePath Condition="'$(GamePath)' == ''">$(ATT_GAME_PATH)</GamePath></PropertyGroup>
-  <ItemGroup><Compile Include="Core.cs"/><Compile Include="Settings.cs"/><Compile Include="Loading.cs"/><Compile Include="ForestInstructionBatching.cs"/><Compile Include="Connectivity.cs"/><Compile Include="Modules.cs"/><Compile Include="TestAccess.cs"/><Compile Include="Modules/**/*.cs"/></ItemGroup>
+  <ItemGroup><Compile Include="Core.cs"/><Compile Include="Settings.cs"/><Compile Include="Loading.cs"/><Compile Include="ForestInstructionBatching.cs"/><Compile Include="ForestGenerationBudget.cs"/><Compile Include="LoadTransitionTiming.cs"/><Compile Include="Connectivity.cs"/><Compile Include="RewriteTerrain.cs"/><Compile Include="RewriteTerrainMask.cs"/><Compile Include="Modules.cs"/><Compile Include="TestAccess.cs"/><Compile Include="Modules/**/*.cs"/><Compile Include="../PerformanceCompatibility/CompatibilityReport.cs" Link="Support/CompatibilityReport.cs"/><Compile Include="../PerformanceCompatibility/RuntimeSnapshot.cs" Link="Support/RuntimeSnapshot.cs"/></ItemGroup>
   <ItemGroup>
+    <Compile Include="ForestGenerationTiming.cs"/>
+    <Compile Include="BridgeIntersectionPreparation.cs"/>
+    <Compile Include="PrefabUnloadGuard.cs"/>
+    <Compile Include="PopulationRestorePrewarm.cs"/>
     <Reference Include="0Harmony"><HintPath>$(GamePath)/MelonLoader/net35/0Harmony.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="MelonLoader"><HintPath>$(GamePath)/MelonLoader/net35/MelonLoader.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="Root.Township"><HintPath>$(GamePath)/A Township Tale_Data/Managed/Root.Township.dll</HintPath><Private>false</Private></Reference>
@@ -16,6 +20,6 @@
     <Reference Include="Alta.Singletons"><HintPath>$(GamePath)/A Township Tale_Data/Managed/Alta.Singletons.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="UnityEngine.TerrainModule"><HintPath>$(GamePath)/A Township Tale_Data/Managed/UnityEngine.TerrainModule.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="Newtonsoft.Json"><HintPath>$(GamePath)/A Township Tale_Data/Managed/Newtonsoft.Json.dll</HintPath><Private>false</Private></Reference>
-    <Reference Include="netstandard"><HintPath Condition="Exists('/usr/lib/mono/4.8-api/Facades/netstandard.dll')">/usr/lib/mono/4.8-api/Facades/netstandard.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="netstandard"><HintPath>/usr/lib/mono/4.8-api/Facades/netstandard.dll</HintPath><Private>false</Private></Reference>
   </ItemGroup>
 </Project>

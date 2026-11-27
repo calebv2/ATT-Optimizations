@@ -1,8 +1,12 @@
-# Forest Performance 0.2.0; startup settings.
+# Forest Performance 0.2.7 startup settings.
 enabled=true
 navigation_fixes=true
 reset_fixes=true
 forest_step_diagnostics=true
 connectivity_updates=true
+connectivity_outside_proof=false
 forest_instructions_per_frame=1
+forest_generation_budget_ms=4
 separate_entity_loads=true
+rewrite_terrain_masks=true
+population_restore_prewarm=true

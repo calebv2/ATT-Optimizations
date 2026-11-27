@@ -38,11 +38,21 @@ namespace ForestPerformance
         private static int[]? areaOwners;
         private static NavGraph[]? ownerGraphs;
         private static string ownerReason = "no_native_fill_index";
-        private static int censusBudgetFailures;
+        private const int OwnerSliceUnits = 65536;
+        private const double OwnerSliceMs = 1, OwnerSliceIntervalMs = 10, OwnerRetryMs = 1000;
+        private static int topologyEpoch, requestedEpoch, requestedTopology;
+        private static OwnerCensus? ownerBuild;
+        private static AstarPath? requestedAstar;
+        private static NavGraph[]? requestedGraphs;
+        private static double nextOwnerSlice, ownerRetryAfter;
+        internal static bool OwnerRebuildPending => requestedGraphs != null;
+        internal static long OwnerSlices, OwnerSliceYields, OwnerRestarts, OwnerRetries;
+        internal static double LastOwnerMaxSliceMs;
         internal static long OwnerCensuses, OwnerBudgetStops;
         internal static double LastOwnerCensusMs;
         internal static int LastOwnerCensusNodes;
         internal static long Scoped, Native, Fallbacks, Errors, UnknownItems, ProofUnits, NewNodes, BoundaryNodes;
+        internal static long OutsideProofAttempts, OutsideProofRepairs, OutsideProofBudgetStops;
         internal sealed class Change
         {
             internal readonly HashSet<GraphNode> New = new HashSet<GraphNode>();
@@ -53,6 +63,7 @@ namespace ForestPerformance
             internal readonly List<KeyValuePair<GraphNode, uint>> Writes = new List<KeyValuePair<GraphNode, uint>>();
             internal uint Last;
             internal int Units;
+            internal bool OutsideProofAttempted;
         }
         internal sealed class ProofBudget
         {
@@ -64,9 +75,10 @@ namespace ForestPerformance
             internal bool Take(int n = 1)
             {
                 Units += n;
-                return Units <= limit && (milliseconds <= 0 || (Units & 31) != 0 ||
-                    (Stopwatch.GetTimestamp() - started) * 1000.0 / Stopwatch.Frequency <= milliseconds);
+                return Units <= limit && ((Units & 31) != 0 || TimeAvailable);
             }
+            internal bool TimeAvailable => milliseconds <= 0 ||
+                (Stopwatch.GetTimestamp() - started) * 1000.0 / Stopwatch.Frequency <= milliseconds;
         }
         internal struct TileCall { internal NavmeshBase? Graph; internal int X, Z, W, D; }
         internal struct FillCall { internal double Started; internal string? Reason; }
@@ -142,6 +154,7 @@ namespace ForestPerformance
         private static void Invalidate(string why)
         {
             unknown = true; reason = why;
+            Interlocked.Increment(ref topologyEpoch); CancelOwnerBuild();
             areaOwners = null; ownerGraphs = null; ownerReason = "unknown_topology_writer";
         }
         private static void Reset(bool trustworthy)
@@ -151,7 +164,7 @@ namespace ForestPerformance
         private static void SyncWorker()
         {
             if (Interlocked.Exchange(ref workerFull, 0) != 0)
-            { Reset(false); areaOwners = null; ownerGraphs = null; ownerReason = "worker_native_fill_invalidated"; }
+            { Reset(false); Interlocked.Increment(ref topologyEpoch); CancelOwnerBuild(); areaOwners = null; ownerGraphs = null; ownerReason = "worker_native_fill_invalidated"; }
         }
         private static void KnownBegin(out int __state) { __state = knownDepth; knownDepth++; }
         private static void KnownEnd(int __state, Exception? __exception)
@@ -218,6 +231,13 @@ namespace ForestPerformance
         private static void TileBegin(NavmeshBase __instance, int x, int z, int w, int d, out TileCall __state)
         {
             __state = default;
+            if (!Core.Ready || !Core.Config.Connectivity) return;
+            Interlocked.Increment(ref topologyEpoch);
+            if (!Core.Main) { Interlocked.Exchange(ref workerFull, 1); return; }
+            // A published index intentionally survives known recuts: it proves
+            // ownership of the OLD labels used by TryPlan. A partial census
+            // cannot mix pre- and post-recut storage, even for a known writer.
+            CancelOwnerBuild();
             if (!Active) return;
             SyncWorker();
             if (knownDepth == 0 || processDepth == 0) { Invalidate("unknown_tile_writer"); return; }
@@ -268,12 +288,14 @@ namespace ForestPerformance
         }
         // Pure preflight: no GraphNode.Area is changed on either success or failure.
         // Multiple tile recuts collapse to their surviving final nodes.
-        internal static bool TryPlan(IEnumerable<KeyValuePair<uint, Change>> changes, uint last, ProofBudget budget, out Plan plan, out string why, Func<uint, uint, bool>? ownerCheck = null)
+        internal static bool TryPlan(IEnumerable<KeyValuePair<uint, Change>> changes, uint last, ProofBudget budget, out Plan plan, out string why,
+            Func<uint, uint, bool>? ownerCheck = null, bool allowOutsideProof = false)
         {
             plan = new Plan { Last = last }; why = "none";
             foreach (var pair in changes)
             {
                 uint graph = pair.Key; Change change = pair.Value;
+                bool outsideProofEnabled = allowOutsideProof && graph == 0 && ownerCheck != null && last < MaxArea;
                 var nodes = new HashSet<GraphNode>(change.New.Where(n => n != null && !n.Destroyed));
                 var component = new Dictionary<GraphNode, int>();
                 var outside = new Dictionary<GraphNode, int>();
@@ -303,7 +325,15 @@ namespace ForestPerformance
                             if (!other.Walkable) { bad = true; failure = "unwalkable_connected_node"; return; }
                             // Native TriangleMesh tile edges must be reciprocal. An
                             // asymmetric/custom connection uses the native relabel.
-                            if (!other.ContainsConnection(current)) { bad = true; failure = "asymmetric_connection"; return; }
+                            if (outsideProofEnabled)
+                            {
+                                if (!TryTriangle(current, graph, out var currentTriangle) || !TryTriangle(other, graph, out var otherTriangle))
+                                { bad = true; failure = "unsupported_triangle_connection"; return; }
+                                if (!CheckReverseConnection(otherTriangle, currentTriangle, budget, out bool reciprocal))
+                                { bad = true; failure = "proof_budget"; return; }
+                                if (!reciprocal) { bad = true; failure = "asymmetric_connection"; return; }
+                            }
+                            else if (!other.ContainsConnection(current)) { bad = true; failure = "asymmetric_connection"; return; }
                             if (nodes.Contains(other))
                             {
                                 if (component.TryGetValue(other, out int existing))
@@ -322,6 +352,20 @@ namespace ForestPerformance
                     }
                 }
                 var oldRegionComponent = new Dictionary<uint, int>();
+                HashSet<uint>? splitAreas = null;
+                bool NoteComponent(uint area, int id)
+                {
+                    if (!oldRegionComponent.TryGetValue(area, out int previous))
+                    {
+                        oldRegionComponent.Add(area, id);
+                        return true;
+                    }
+                    if (previous == id) return true;
+                    // Overflowed native area IDs can identify different islands.
+                    if (!outsideProofEnabled) return false;
+                    (splitAreas ??= new HashSet<uint>()).Add(area);
+                    return true;
+                }
                 foreach (GraphNode boundary in change.Boundary)
                 {
                     if (!budget.Take()) { why = "proof_budget"; return false; }
@@ -329,82 +373,291 @@ namespace ForestPerformance
                     if (boundary.GraphIndex != graph || !boundary.Walkable || boundary.Area == 0) { why = "unsupported_old_boundary"; return false; }
                     if (ownerCheck != null && !ownerCheck(boundary.Area, graph)) { why = "area_shared_or_owner_unknown"; return false; }
                     if (!outside.TryGetValue(boundary, out int id)) { why = "old_boundary_disconnected"; return false; }
-                    if (oldRegionComponent.TryGetValue(boundary.Area, out int old) && old != id) { why = "possible_old_area_split"; return false; }
-                    oldRegionComponent[boundary.Area] = id;
+                    if (!NoteComponent(boundary.Area, id)) { why = "possible_old_area_split"; return false; }
                 }
-                // Also require all final external contacts of one old region to
-                // join one replacement component, even across repeated recuts.
+                // Validate all final contacts, including contacts created by
+                // later recuts in this work-item batch.
                 foreach (var edge in outside)
                 {
-                    if (oldRegionComponent.TryGetValue(edge.Key.Area, out int id) && id != edge.Value) { why = "possible_old_area_split"; return false; }
-                    oldRegionComponent[edge.Key.Area] = edge.Value;
+                    if (outsideProofEnabled && !budget.Take()) { why = "proof_budget"; return false; }
+                    if (!NoteComponent(edge.Key.Area, edge.Value)) { why = "possible_old_area_split"; return false; }
+                }
+                if (splitAreas != null)
+                {
+                    plan.OutsideProofAttempted = true;
+                    foreach (uint area in splitAreas)
+                        if (!OutsideContactsConnected(graph, area, outside, nodes, component, labels, budget, out why))
+                            return false;
                 }
                 for (int i = 0; i < labels.Count; i++)
                     if (labels[i] == 0)
                     { if (plan.Last >= MaxArea) { why = "area_id_exhaustion"; return false; } labels[i] = ++plan.Last; }
                 foreach (var entry in component) plan.Writes.Add(new KeyValuePair<GraphNode, uint>(entry.Key, labels[entry.Value]));
             }
+            if (plan.OutsideProofAttempted && !budget.TimeAvailable) { why = "outside_proof_budget"; return false; }
             plan.Units = budget.Units;
             return true;
         }
-        // Native full relabel has already finalized every region while path
-        // processing is paused. Index the final region owners to reject even
-        // incoming-only cross-graph connections (which local adjacency misses).
-        // Tile storage enumeration is bounded between units and adds no Unity
-        // calls. Three over-budget attempts stop further indexing this session.
-        private static void BuildOwners()
+        // If the replacement splits an old area into several components, test
+        // whether all their external contacts still connect through surviving
+        // tiles. Every surviving old boundary already has a replacement
+        // contact, so proving this external connection preserves the old area.
+        // New nodes are never used to traverse the outside graph.
+        private static bool OutsideContactsConnected(uint graph, uint area, Dictionary<GraphNode, int> outside,
+            HashSet<GraphNode> changed, Dictionary<GraphNode, int> component, List<uint> labels, ProofBudget budget, out string why)
         {
-            areaOwners = null; ownerGraphs = null;
-            if (!Core.Config.Connectivity || !Core.Ready || censusBudgetFailures >= 3)
-            { ownerReason = "owner_index_disabled_or_budget_circuit"; return; }
-            double started = Core.Now; int epoch = Volatile.Read(ref fillEpoch);
-            try
+            why = "outside_proof_budget";
+            if (!budget.TimeAvailable) return false;
+            var remaining = new HashSet<TriangleMeshNode>();
+            TriangleMeshNode? start = null;
+            foreach (var entry in outside)
             {
-                if (Volatile.Read(ref workerFills) != 0) { ownerReason = "worker_fill_in_progress"; return; }
-                if (modifierRoot.GetValue(null) != null) { ownerReason = "graph_modifier_or_node_link"; return; }
-                var astar = AstarPath.active;
-                if (ReferenceEquals(astar, null) || astar.graphs == null) { ownerReason = "no_graphs"; return; }
-                var graphs = (NavGraph[])astar.graphs.Clone(); var owners = new int[MaxArea + 1];
-                int count = 0; LastOwnerCensusNodes = 0;
-                foreach (NavGraph graph in graphs)
+                if (!budget.Take()) return false;
+                if (entry.Key.Area != area) continue;
+                if (!TryTriangle(entry.Key, graph, out var boundary)) { why = "outside_proof_unsupported_edge"; return false; }
+                remaining.Add(boundary);
+                if (start == null) start = boundary;
+            }
+            if (start == null) { why = "outside_proof_disconnected"; return false; }
+            remaining.Remove(start);
+            var seen = new HashSet<TriangleMeshNode> { start };
+            var pending = new Queue<TriangleMeshNode>();
+            pending.Enqueue(start);
+            while (remaining.Count > 0 && pending.Count > 0)
+            {
+                if (!budget.Take() || !budget.TimeAvailable) return false;
+                TriangleMeshNode current = pending.Dequeue();
+                if (current.connections == null) continue;
+                foreach (var link in current.connections)
                 {
-                    if (graph == null) continue;
-                    if (graph.GetType() != typeof(RecastGraph)) { ownerReason = "custom_or_link_graph"; return; }
-                    var tiles = ((RecastGraph)graph).GetTiles() ?? new NavmeshTile[0];
-                    for (int tileIndex = 0; tileIndex < tiles.Length; tileIndex++)
+                    if (!budget.Take()) return false;
+                    if (!TryTriangle(link.node, graph, out var other)) { why = "outside_proof_unsupported_edge"; return false; }
+                    bool changedNode = changed.Contains(other);
+                    if (changedNode ? !component.TryGetValue(other, out int id) || labels[id] != area : other.Area != area)
+                    { why = "outside_proof_unsupported_edge"; return false; }
+                    if (!CheckReverseConnection(other, current, budget, out bool reciprocal)) return false;
+                    if (!reciprocal) { why = "outside_proof_unsupported_edge"; return false; }
+                    if (!changedNode && seen.Add(other))
                     {
-                        if ((tileIndex & 255) == 0 && Core.Now - started > 20)
-                        { censusBudgetFailures++; Interlocked.Increment(ref OwnerBudgetStops); ownerReason = "owner_index_budget"; return; }
-                        NavmeshTile tile = tiles[tileIndex];
-                        // Match native GetNodes: a multi-cell tile appears in the
-                        // backing array more than once and is visited at origin only.
-                        if (tile == null || tile.x + tile.z * ((RecastGraph)graph).tileXCount != tileIndex || tile.nodes == null) continue;
-                        foreach (GraphNode node in tile.nodes)
-                        {
-                            LastOwnerCensusNodes = ++count;
-                            if (count > 5000000 || ((count & 255) == 0 && Core.Now - started > 20))
-                            { censusBudgetFailures++; Interlocked.Increment(ref OwnerBudgetStops); ownerReason = "owner_index_budget"; return; }
-                            if (node == null || node.Destroyed || node.GraphIndex != graph.graphIndex) { ownerReason = "unexpected_tile_nodes"; return; }
-                            uint area = node.Area; if (area == 0) continue;
-                            int owner = (int)graph.graphIndex + 1;
-                            if (owners[area] == 0) owners[area] = owner;
-                            else if (owners[area] != owner) owners[area] = -1;
-                        }
+                        remaining.Remove(other);
+                        pending.Enqueue(other);
                     }
                 }
-                if (epoch != Volatile.Read(ref fillEpoch) || Volatile.Read(ref workerFills) != 0)
-                { ownerReason = "worker_fill_invalidated_index"; return; }
-                ownerGraphs = graphs; ownerEpoch = epoch; areaOwners = owners; ownerReason = "valid";
-                Interlocked.Increment(ref OwnerCensuses);
             }
-            catch { Interlocked.Increment(ref Errors); ownerReason = "owner_index_error"; }
-            finally { LastOwnerCensusMs = Core.Now - started; }
+            if (!budget.TimeAvailable) return false;
+            why = remaining.Count == 0 ? "none" : "outside_proof_disconnected";
+            return remaining.Count == 0;
+        }
+        private static bool TryTriangle(GraphNode? node, uint graph, out TriangleMeshNode triangle)
+        {
+            if (node != null && !node.Destroyed && node.Walkable && node.GraphIndex == graph && node.GetType() == typeof(TriangleMeshNode))
+            { triangle = (TriangleMeshNode)node; return true; }
+            triangle = null!;
+            return false;
+        }
+        private static bool CheckReverseConnection(TriangleMeshNode node, TriangleMeshNode neighbor, ProofBudget budget, out bool found)
+        {
+            found = false;
+            if (node.connections == null) return true;
+            foreach (var reverse in node.connections)
+            {
+                if (!budget.Take()) return false;
+                if (ReferenceEquals(reverse.node, neighbor)) { found = true; break; }
+            }
+            return true;
+        }
+        // Main-thread cursor over native Recast storage. The second pass checks
+        // tile/node-array identity and recomputes ownership, including in-place
+        // label changes. Nothing is published until both passes and epochs agree.
+        internal sealed class OwnerCensus
+        {
+            private sealed class Storage
+            {
+                internal readonly RecastGraph Graph;
+                internal readonly uint Index;
+                internal readonly int Width, Depth;
+                internal readonly NavmeshTile[]? Tiles;
+                internal Stamp[]? Seen;
+                internal Storage(RecastGraph graph)
+                { Graph = graph; Index = graph.graphIndex; Width = graph.tileXCount; Depth = graph.tileZCount; Tiles = graph.GetTiles(); }
+                internal bool Matches() => Graph.graphIndex == Index && Graph.tileXCount == Width && Graph.tileZCount == Depth && ReferenceEquals(Graph.GetTiles(), Tiles);
+            }
+            private struct Stamp
+            {
+                internal NavmeshTile? Tile;
+                internal GraphNode[]? Nodes;
+                internal int X, Z, W, D;
+                internal Stamp(NavmeshTile? tile)
+                { Tile = tile; Nodes = tile?.nodes; X = tile?.x ?? 0; Z = tile?.z ?? 0; W = tile?.w ?? 0; D = tile?.d ?? 0; }
+                internal bool Matches(NavmeshTile? tile) => ReferenceEquals(Tile, tile) &&
+                    (tile == null || ReferenceEquals(Nodes, tile.nodes) && X == tile.x && Z == tile.z && W == tile.w && D == tile.d);
+            }
+            internal readonly NavGraph[] Graphs;
+            internal readonly int[] Owners = new int[MaxArea + 1];
+            private readonly int[] verified = new int[MaxArea + 1];
+            private readonly List<uint> labels = new List<uint>();
+            private readonly Storage?[] storage;
+            private readonly int maxNodes;
+            private int graphIndex, tileIndex, nodeIndex, compareIndex;
+            private bool checking, entered;
+            internal int Nodes;
+            internal bool Complete;
+            internal string? Failure;
+            internal OwnerCensus(NavGraph[] graphs, int maxNodes = 5000000)
+            {
+                Graphs = (NavGraph[])graphs.Clone(); storage = new Storage?[graphs.Length]; this.maxNodes = maxNodes;
+                if (graphs.Length > 128) { Failure = "owner_index_graph_budget"; return; }
+                var indices = new HashSet<uint>(); long tiles = 0;
+                for (int i = 0; i < graphs.Length; i++)
+                {
+                    if (graphs[i] == null) continue;
+                    if (graphs[i].GetType() != typeof(RecastGraph)) { Failure = "custom_or_link_graph"; return; }
+                    var item = storage[i] = new Storage((RecastGraph)graphs[i]);
+                    if (!indices.Add(item.Index)) { Failure = "unexpected_graph_index"; return; }
+                    tiles += item.Tiles?.Length ?? 0;
+                    if (tiles > 250000) { Failure = "owner_index_tile_budget"; return; }
+                }
+            }
+            internal bool StorageMatches()
+            {
+                foreach (var item in storage) if (item != null && !item.Matches()) return false;
+                return true;
+            }
+            private void Note(int[] target, uint area, uint graph)
+            {
+                if (area == 0) return;
+                int owner = (int)graph + 1;
+                if (target[area] == 0) { if (!checking) labels.Add(area); target[area] = owner; }
+                else if (target[area] != owner) target[area] = -1;
+            }
+            // False without Failure is a cooperative budget yield. Call again
+            // with a fresh budget; no graph or gameplay value has been written.
+            internal bool Advance(ProofBudget budget)
+            {
+                if (Failure != null || Complete) return Complete;
+                if (!StorageMatches()) { Failure = "owner_index_storage_changed"; return false; }
+                while (graphIndex < storage.Length)
+                {
+                    var item = storage[graphIndex]; var tiles = item?.Tiles;
+                    if (item == null || tiles == null || tileIndex >= tiles.Length)
+                    { graphIndex++; tileIndex = nodeIndex = 0; entered = false; continue; }
+                    if (!entered)
+                    {
+                        if (!budget.Take()) return false;
+                        if (item.Seen == null) item.Seen = new Stamp[tiles.Length];
+                        var tile = tiles[tileIndex];
+                        if (!checking) item.Seen[tileIndex] = new Stamp(tile);
+                        else if (!item.Seen[tileIndex].Matches(tile)) { Failure = "owner_index_tile_changed"; return false; }
+                        entered = true;
+                    }
+                    var stamp = item.Seen![tileIndex]; var nodes = stamp.Nodes;
+                    // Match native GetNodes: multi-cell tiles are visited only
+                    // at their origin. Empty and duplicate slots are still checked.
+                    if (stamp.Tile != null && stamp.X + stamp.Z * item.Width == tileIndex && nodes != null)
+                    {
+                        while (nodeIndex < nodes.Length)
+                        {
+                            if (!budget.Take()) return false;
+                            var node = nodes[nodeIndex++];
+                            if (!checking && ++Nodes > maxNodes) { Failure = "owner_index_node_budget"; return false; }
+                            if (node == null || node.Destroyed || node.GraphIndex != item.Index || node.Area > MaxArea)
+                            { Failure = "unexpected_tile_nodes"; return false; }
+                            if (checking && node.Area != 0 && Owners[node.Area] == 0)
+                            { Failure = "owner_index_labels_changed"; return false; }
+                            Note(checking ? verified : Owners, node.Area, item.Index);
+                        }
+                    }
+                    tileIndex++; nodeIndex = 0; entered = false;
+                }
+                if (!checking) { checking = true; graphIndex = tileIndex = nodeIndex = 0; return Advance(budget); }
+                while (compareIndex < labels.Count)
+                {
+                    if (!budget.Take()) return false;
+                    uint label = labels[compareIndex++];
+                    if (Owners[label] != verified[label]) { Failure = "owner_index_labels_changed"; return false; }
+                }
+                Complete = true; return true;
+            }
+        }
+        private static void CancelOwnerBuild()
+        {
+            if (requestedGraphs != null) Interlocked.Increment(ref OwnerRestarts);
+            ownerBuild = null; requestedGraphs = null; requestedAstar = null;
+        }
+        // A successful native fill is the only runtime source of a rebuild
+        // request. Repeated fills coalesce to the latest epoch; cooldown is not
+        // reset by churn, and an unfinished/stale census is never published.
+        private static void BuildOwners()
+        {
+            CancelOwnerBuild(); areaOwners = null; ownerGraphs = null;
+            if (!Core.Config.Connectivity || !Core.Ready || faulted)
+            { ownerReason = "owner_index_disabled"; return; }
+            var astar = AstarPath.active;
+            if (ReferenceEquals(astar, null) || astar.graphs == null) { ownerReason = "no_graphs"; return; }
+            if (astar.graphs.Length > 128) { ownerReason = "owner_index_graph_budget"; ownerRetryAfter = Core.Now + OwnerRetryMs; return; }
+            requestedAstar = astar; requestedGraphs = (NavGraph[])astar.graphs.Clone();
+            requestedEpoch = Volatile.Read(ref fillEpoch); requestedTopology = Volatile.Read(ref topologyEpoch);
+            LastOwnerCensusNodes = 0; LastOwnerCensusMs = LastOwnerMaxSliceMs = 0;
+            ownerReason = "owner_index_pending"; AdvanceOwners();
+        }
+        private static bool OwnerRequestMatches() => requestedGraphs != null && ReferenceEquals(AstarPath.active, requestedAstar) &&
+            requestedEpoch == Volatile.Read(ref fillEpoch) && requestedTopology == Volatile.Read(ref topologyEpoch) &&
+            Volatile.Read(ref workerFills) == 0 && Volatile.Read(ref workerFull) == 0 && SameRegistry(requestedGraphs, requestedAstar?.graphs);
+        private static void AdvanceOwners()
+        {
+            if (!Core.Main || requestedGraphs == null || !Core.Ready || !Core.Config.Connectivity || faulted) return;
+            if (!OwnerRequestMatches()) { CancelOwnerBuild(); ownerReason = "owner_rebuild_invalidated"; return; }
+            if (requestedAstar!.isScanning) { Invalidate("scan_requires_native_fill"); return; }
+            if (modifierRoot.GetValue(null) != null) { CancelOwnerBuild(); ownerReason = "graph_modifier_or_node_link"; return; }
+            double now = Core.Now;
+            if (now < ownerRetryAfter) { ownerReason = "owner_index_cooldown"; return; }
+            if (now < nextOwnerSlice) return;
+            double started = now;
+            try
+            {
+                var budget = new ProofBudget(OwnerSliceUnits, OwnerSliceMs);
+                ownerBuild ??= new OwnerCensus(requestedGraphs);
+                bool complete = ownerBuild.Advance(budget);
+                LastOwnerCensusNodes = ownerBuild.Nodes;
+                if (!OwnerRequestMatches() || !ownerBuild.StorageMatches())
+                { CancelOwnerBuild(); ownerReason = "owner_rebuild_invalidated"; return; }
+                if (requestedAstar!.isScanning) { Invalidate("scan_requires_native_fill"); return; }
+                if (modifierRoot.GetValue(null) != null) { CancelOwnerBuild(); ownerReason = "graph_modifier_or_node_link"; return; }
+                if (ownerBuild.Failure != null || LastOwnerCensusMs > 250)
+                {
+                    string failure = ownerBuild.Failure ?? "owner_index_time_budget";
+                    if (failure.EndsWith("_budget", StringComparison.Ordinal))
+                    {
+                        ownerBuild = null; ownerRetryAfter = Core.Now + OwnerRetryMs;
+                        LastOwnerCensusMs = 0; Interlocked.Increment(ref OwnerBudgetStops); Interlocked.Increment(ref OwnerRetries);
+                        ownerReason = failure;
+                    }
+                    else { Invalidate(failure); ownerReason = failure; }
+                    return;
+                }
+                if (complete)
+                {
+                    // No work can interleave on the main thread between this
+                    // final epoch check and publishing the completed arrays.
+                    ownerGraphs = requestedGraphs; ownerEpoch = requestedEpoch; areaOwners = ownerBuild.Owners;
+                    ownerBuild = null; requestedGraphs = null; requestedAstar = null; ownerRetryAfter = 0;
+                    ownerReason = "valid"; Interlocked.Increment(ref OwnerCensuses);
+                }
+                else { ownerReason = "owner_index_building"; Interlocked.Increment(ref OwnerSliceYields); }
+            }
+            catch { Interlocked.Increment(ref Errors); CancelOwnerBuild(); ownerReason = "owner_index_error"; ownerRetryAfter = Core.Now + OwnerRetryMs; }
+            finally
+            {
+                double elapsed = Core.Now - started; LastOwnerCensusMs += elapsed;
+                LastOwnerMaxSliceMs = Math.Max(LastOwnerMaxSliceMs, elapsed);
+                Interlocked.Increment(ref OwnerSlices); nextOwnerSlice = Core.Now + OwnerSliceIntervalMs;
+            }
         }
         private static bool OwnerIndexMatches()
         {
-            var graphs = AstarPath.active?.graphs; var expected = ownerGraphs;
-            return ownerEpoch == Volatile.Read(ref fillEpoch) && Volatile.Read(ref workerFills) == 0 && Volatile.Read(ref workerFull) == 0 && areaOwners != null && graphs != null && expected != null && graphs.Length == expected.Length &&
-                graphs.Where((g, i) => !ReferenceEquals(g, expected[i])).Any() == false;
+            var astar = AstarPath.active; var graphs = astar?.graphs; var expected = ownerGraphs;
+            return !ReferenceEquals(astar, null) && !astar.isScanning && ownerEpoch == Volatile.Read(ref fillEpoch) &&
+                Volatile.Read(ref workerFills) == 0 && Volatile.Read(ref workerFull) == 0 && areaOwners != null && graphs != null && expected != null && SameRegistry(graphs, expected);
         }
         private static bool Owned(uint area, uint graph)
         {
@@ -450,7 +703,14 @@ namespace ForestPerformance
                     else
                     {
                         var budget = new ProofBudget();
-                        if (TryPlan(Changes.Select(x => new KeyValuePair<uint, Change>(x.Key.graphIndex, x.Value)), (uint)lastArea.GetValue(processor)!, budget, out var plan, out why, Owned))
+                        bool planned = TryPlan(Changes.Select(x => new KeyValuePair<uint, Change>(x.Key.graphIndex, x.Value)),
+                            (uint)lastArea.GetValue(processor)!, budget, out var plan, out why, Owned, Core.Config.OutsideConnectivityProof);
+                        if (plan.OutsideProofAttempted)
+                        {
+                            Interlocked.Increment(ref OutsideProofAttempts);
+                            if (why == "outside_proof_budget") Interlocked.Increment(ref OutsideProofBudgetStops);
+                        }
+                        if (planned)
                         {
                             // The bounded proof may take several milliseconds.
                             // Recheck the native-fill epoch immediately before
@@ -459,8 +719,9 @@ namespace ForestPerformance
                             else
                             {
                                 Commit(plan, processor); Interlocked.Increment(ref Scoped); Interlocked.Add(ref ProofUnits, plan.Units);
+                                if (plan.OutsideProofAttempted) Interlocked.Increment(ref OutsideProofRepairs);
                                 foreach (var change in Changes.Values) { Interlocked.Add(ref NewNodes, change.New.Count); Interlocked.Add(ref BoundaryNodes, change.Boundary.Count); }
-                                Reset(true); Record("connectivity_scoped", Core.Now - start, "proof_units=" + plan.Units + ";writes=" + plan.Writes.Count + ";native_area_equivalence=boundary_preserved"); return;
+                                Reset(true); Record("connectivity_scoped", Core.Now - start, "proof_units=" + plan.Units + ";writes=" + plan.Writes.Count + ";native_area_equivalence=boundary_preserved;outside_proof=" + plan.OutsideProofAttempted); return;
                             }
                         }
                     }
@@ -503,7 +764,8 @@ namespace ForestPerformance
         }
         internal static void Shutdown()
         {
-            Changes.Clear(); areaOwners = null; ownerGraphs = null; registrySnapshot = null;
+            Changes.Clear(); CancelOwnerBuild(); areaOwners = null; ownerGraphs = null; registrySnapshot = null;
+            nextOwnerSlice = ownerRetryAfter = 0;
             unknown = true; reason = "shutdown"; ownerReason = "shutdown";
         }
         private static bool SameRegistry(NavGraph[]? a, NavGraph[]? b)
@@ -529,15 +791,21 @@ namespace ForestPerformance
                     bool staleTracked = Changes.Keys.Any(g => current == null || Array.IndexOf(current, g) < 0);
                     if (staleTracked || !SameRegistry(registrySnapshot, current) || (ownerGraphs != null && !SameRegistry(ownerGraphs, current)))
                     {
-                        Reset(false); areaOwners = null; ownerGraphs = null;
+                        Reset(false); Invalidate("graph_registry_changed");
                         reason = ownerReason = "graph_registry_changed";
                         registrySnapshot = current == null ? null : (NavGraph[])current.Clone();
                     }
                 }
+                AdvanceOwners();
             }
             if (Core.Now < nextHealth) return;
             nextHealth = Core.Now + 60000;
-            Record("connectivity_health", 0, "scoped=" + Interlocked.Read(ref Scoped) + ";native=" + Interlocked.Read(ref Native) + ";fallbacks=" + Interlocked.Read(ref Fallbacks) + ";unknown_items=" + Interlocked.Read(ref UnknownItems) + ";errors=" + Interlocked.Read(ref Errors) + ";pending_graphs=" + Changes.Count + ";pending_unknown=" + unknown + ";reason=" + reason + ";circuit_disabled=" + faulted + ";owner_index=" + ownerReason + ";owner_censuses=" + Interlocked.Read(ref OwnerCensuses) + ";owner_budget_stops=" + Interlocked.Read(ref OwnerBudgetStops) + ";owner_census_ms=" + LastOwnerCensusMs + ";owner_census_nodes=" + LastOwnerCensusNodes + ";owner_index_valid=" + (areaOwners != null && ownerEpoch == Volatile.Read(ref fillEpoch)));
+            Record("connectivity_health", 0, "scoped=" + Interlocked.Read(ref Scoped) + ";native=" + Interlocked.Read(ref Native) + ";fallbacks=" + Interlocked.Read(ref Fallbacks) + ";unknown_items=" + Interlocked.Read(ref UnknownItems) + ";errors=" + Interlocked.Read(ref Errors) + ";pending_graphs=" + Changes.Count + ";pending_unknown=" + unknown + ";reason=" + reason + ";circuit_disabled=" + faulted + ";owner_index=" + ownerReason + ";owner_censuses=" + Interlocked.Read(ref OwnerCensuses) + ";owner_budget_stops=" + Interlocked.Read(ref OwnerBudgetStops) + ";owner_census_ms=" + LastOwnerCensusMs + ";owner_census_nodes=" + LastOwnerCensusNodes + ";owner_index_valid=" + OwnerIndexMatches() + ";owner_rebuild_pending=" + OwnerRebuildPending +
+                ";owner_slices=" + Interlocked.Read(ref OwnerSlices) + ";owner_slice_yields=" + Interlocked.Read(ref OwnerSliceYields) +
+                ";owner_restarts=" + Interlocked.Read(ref OwnerRestarts) + ";owner_retries=" + Interlocked.Read(ref OwnerRetries) +
+                ";owner_max_slice_ms=" + LastOwnerMaxSliceMs + ";owner_retry_ms=" + Math.Max(0, ownerRetryAfter - Core.Now) +
+                ";outside_proof_enabled=" + Core.Config.OutsideConnectivityProof + ";outside_proof_attempts=" + Interlocked.Read(ref OutsideProofAttempts) +
+                ";outside_proof_repairs=" + Interlocked.Read(ref OutsideProofRepairs) + ";outside_proof_budget_stops=" + Interlocked.Read(ref OutsideProofBudgetStops));
         }
     }
 }

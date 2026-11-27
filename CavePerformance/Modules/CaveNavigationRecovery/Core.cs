@@ -12,8 +12,9 @@ using UnityEngine;
 
 namespace CaveNavigationRecovery
 {
-    public sealed class Core : CavePerformance.Support.Module
+    public sealed partial class Core : CavePerformance.Support.Module
     {
+        internal static bool Ready { get; private set; }
         internal static Core? Instance;
         private HarmonyLib.Harmony? harmony;
         private static int ownerThread;
@@ -24,7 +25,7 @@ namespace CaveNavigationRecovery
         [ThreadStatic] private static WanderState? retrying;
         private const BindingFlags Flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static;
         internal static MethodInfo Generate = null!, Need = null!, ScanStep = null!, Wander = null!, Failure = null!, Cancel = null!;
-        private static FieldInfo graph = null!, scanGraphs = null!, preparingPath = null!, requesting = null!;
+        private static FieldInfo graph = null!, scanGraphs = null!, preparingPath = null!, requesting = null!, generationDriver = null!;
         private static PropertyInfo scanning = null!, layer = null!;
         private static FieldInfo active = null!, astarData = null!;
         private static MethodInfo removeGraph = null!, getIndex = null!;
@@ -36,20 +37,22 @@ namespace CaveNavigationRecovery
         {
             if (!Application.isBatchMode) return;
             Instance = this; ownerThread = Thread.CurrentThread.ManagedThreadId;
+            staticStopping = false;
             try
             {
                 Assembly root = AppDomain.CurrentDomain.GetAssemblies().First(a => a.GetType("Alta.Chunks.CaveLayerStreamer", false) != null);
                 Bind(root);
                 harmony = new HarmonyLib.Harmony("ATT.CavePerformance.CaveNavigationRecovery");
                 Attach(harmony);
-                Log("READY v0.1.0; completed cave scans required; at most three scan attempts, five seconds between attempts; failed wander flag recovery with at most two delayed retries. GC policy unchanged.");
+                Ready = true;
+                Log("READY v0.2.2; static and procedural caves share scan admission and require completed registered graphs; abandoned generation drivers are cancelled safely; at most three scan attempts, five seconds between attempts; failed wander recovery unchanged. GC policy unchanged.");
             }
             catch (Exception e)
             {
                 try { harmony?.UnpatchSelf(); }
                 catch (Exception rollback) { LoggerInstance.Error("Patch rollback failed: " + rollback); }
                 LoggerInstance.Error("Cave navigation recovery DISABLED: " + e);
-                harmony = null;
+                harmony = null; Ready = false;
             }
         }
         internal static void Bind(Assembly root)
@@ -66,6 +69,7 @@ namespace CaveNavigationRecovery
             Generate = Method(cave, "GeneratePathfinding", typeof(IEnumerator));
             Need = Method(cave, "get_NeedToGeneratePathFinding", typeof(bool));
             graph = Field(cave, "navGraph", recast);
+            generationDriver = Field(cave, "generator", root.GetType("Alta.Caves.GenerationBase", true)!);
             layer = cave.GetProperty("LayerIdentifier", Flags) ?? throw new MissingMemberException("LayerIdentifier");
             Type iterator = astar.GetNestedTypes(Flags).Single(t => t.Name.StartsWith("<ScanAsync>d__", StringComparison.Ordinal));
             ScanStep = Method(iterator, "MoveNext", typeof(bool));
@@ -82,6 +86,7 @@ namespace CaveNavigationRecovery
             Cancel = Method(nav, "CancelRequest", typeof(void));
             preparingPath = Field(nav, "preparingPath", path);
             requesting = Field(nav, "isRequestingPath", typeof(bool));
+            BindStatic(root);
         }
         private static FieldInfo Field(Type type, string name, Type expected)
         {
@@ -100,26 +105,36 @@ namespace CaveNavigationRecovery
             HarmonyMethod Hook(string name) => new HarmonyMethod(typeof(Core), name);
             patcher.Patch(Generate, postfix: Hook(nameof(WrapScan)));
             patcher.Patch(Need, postfix: Hook(nameof(NeedsScan)));
-            patcher.Patch(ScanStep, postfix: Hook(nameof(ScanFinished)));
+            patcher.Patch(ScanStep, prefix: Hook(nameof(ScanStarting)), postfix: Hook(nameof(ScanFinished)));
             patcher.Patch(Wander, postfix: Hook(nameof(WanderStarted)));
             patcher.Patch(Failure, prefix: Hook(nameof(BeforeFailure)), postfix: Hook(nameof(AfterFailure)));
             patcher.Patch(Cancel, prefix: Hook(nameof(Cancelled)));
+            AttachStatic(patcher);
         }
         private static object? Invoke(MethodInfo method, object owner, params object[] args)
         {
             try { return method.Invoke(owner, args); }
             catch (TargetInvocationException e) when (e.InnerException != null) { ExceptionDispatchInfo.Capture(e.InnerException).Throw(); throw; }
         }
-        private sealed class ScanHost : IScanHost
+        private sealed class ScanHost : IScanHost, IScanLifecycle
         {
             private readonly object owner;
+            private readonly object? manager;
+            private readonly UnityEngine.Object? driver;
             private IEnumerator? first;
-            internal ScanHost(object owner, IEnumerator first) { this.owner = owner; this.first = first; }
-            public bool Alive => owner is UnityEngine.Object value && value != null;
+            internal ScanHost(object owner, IEnumerator first)
+            { this.owner = owner; this.first = first; manager = active.GetValue(null); driver = generationDriver.GetValue(owner) as UnityEngine.Object; }
+            public bool Alive => owner is UnityEngine.Object value && value != null && ReferenceEquals(active.GetValue(null), manager) &&
+                (ReferenceEquals(driver, null) || (driver != null && ReferenceEquals(generationDriver.GetValue(owner), driver)));
             public double Now => Time.realtimeSinceStartup;
             public object? Graph => graph.GetValue(owner);
             private object Astar => active.GetValue(null) ?? throw new InvalidOperationException("A* unavailable");
             public bool Scanning => (bool)scanning.GetValue(Astar, null);
+            public bool CancellationRequested => false;
+            public bool GraphRegistered(object candidate) => ReferenceEquals(active.GetValue(null), manager) &&
+                manager != null && (int)Invoke(getIndex, astarData.GetValue(manager)!, candidate)! >= 0;
+            public void Settled(Exception? failure, bool cancelled) { }
+            public void Observe(string phase, double seconds, string detail) => TraceScan("procedural", (int)layer.GetValue(owner, null), phase, seconds, detail);
             public IEnumerator CreateOriginal()
             {
                 if (first != null) { var item = first; first = null; return item; }
@@ -130,10 +145,10 @@ namespace CaveNavigationRecovery
             public void RemoveIncompleteGraph(object incomplete)
             {
                 object manager = Astar;
+                if (!ReferenceEquals(manager, this.manager) || !ReferenceEquals(Graph, incomplete)) throw new InvalidOperationException("Cave scan owner or manager changed; refusing graph removal");
                 if ((bool)scanning.GetValue(manager, null)) throw new InvalidOperationException("Cannot remove a graph while scanning");
                 object data = astarData.GetValue(manager)!;
-                if ((int)Invoke(getIndex, data, incomplete)! < 0) throw new InvalidOperationException("Incomplete cave graph is no longer registered; refusing unsafe removal");
-                if (!(bool)Invoke(removeGraph, data, incomplete)!) throw new InvalidOperationException("Incomplete cave graph removal failed");
+                if ((int)Invoke(getIndex, data, incomplete)! >= 0 && !(bool)Invoke(removeGraph, data, incomplete)!) throw new InvalidOperationException("Incomplete cave graph removal failed");
                 if (ReferenceEquals(Graph, incomplete)) graph.SetValue(owner, null);
                 Log("removed incomplete cave graph");
             }
@@ -142,16 +157,21 @@ namespace CaveNavigationRecovery
         private static void WrapScan(object __instance, ref IEnumerator __result)
         {
             if (!OnThread || bypassFactory) return;
-            __result = new ScanRecovery(new ScanHost(__instance, __result), Scans.GetOrCreateValue(__instance));
+            if (staticStopping) { __result = Empty(); return; }
+            __result = new ScanRecovery(new ScanHost(__instance, __result), Scans.GetOrCreateValue(__instance), CavePerformance.ScanPacing.BeforeGraphRegistration());
         }
         private static void NeedsScan(object __instance, ref bool __result)
         {
             if (!OnThread) return;
             __result = !ScanRecovery.IsReady(Scans.GetOrCreateValue(__instance), graph.GetValue(__instance));
         }
-        private static void ScanFinished(object __instance, bool __result)
+        internal static bool HasActiveProceduralScan(object? owner) => Ready && OnThread && owner != null &&
+            Scans.TryGetValue(owner, out var state) && state.Owner?.HasActiveNativeScan == true;
+        private static void ScanStarting() => ScanRecovery.CurrentScan?.NativeStep();
+        private static void ScanFinished(object __instance, bool __result, bool __runOriginal)
         {
-            if (__result || ScanRecovery.CurrentScan == null) return;
+            object? manager = active.GetValue(null);
+            if (__result || !__runOriginal || ScanRecovery.CurrentScan == null || manager == null || (bool)scanning.GetValue(manager, null)) return;
             if (scanGraphs.GetValue(__instance) is Array graphs)
                 foreach (object item in graphs) if (item != null) ScanRecovery.CurrentScan.Completed(item);
         }
@@ -204,7 +224,9 @@ namespace CaveNavigationRecovery
         }
         public override void OnUpdate()
         {
-            if (harmony == null || !OnThread || Queue.Count == 0) return;
+            if (harmony == null || !OnThread) return;
+            TickStatic(); ScanRecovery.Tick();
+            if (Queue.Count == 0) return;
             double now = Time.realtimeSinceStartup;
             int remaining = 2;
             // A bounded queue, two requests per update, and delayed retries avoid a path request burst.
@@ -229,7 +251,8 @@ namespace CaveNavigationRecovery
         }
         public override void OnApplicationQuit()
         {
-            Queue.Clear();
+            Ready = false; staticStopping = true;
+            ScanRecovery.Shutdown(); ShutdownStatic(); Queue.Clear();
             harmony?.UnpatchSelf();
         }
     }

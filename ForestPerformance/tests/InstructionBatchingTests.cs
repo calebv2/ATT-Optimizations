@@ -27,11 +27,13 @@ internal static class InstructionBatchingTests
         internal readonly int Id;
         internal readonly bool ReturnsNull;
         internal bool Fail;
+        internal Action? Cost;
         internal Unit(int id, bool returnsNull) : base(Instruction.Type.Spawn) { Id = id; ReturnsNull = returnsNull; }
         protected override void SerializeInternal(Alta.Serialization.Stream stream) { }
         public override IInstructionResult Execute(object context)
         {
             if (Fail) throw Sentinel;
+            Cost?.Invoke();
             Executed.Add(Id); return ReturnsNull ? null! : Saved;
         }
     }
@@ -107,6 +109,7 @@ internal static class InstructionBatchingTests
             try { ForestInstructionBatching.CountEveryInstruction(new[] { new CodeInstruction(OpCodes.Ret) }, il, Loading.Step).ToArray(); }
             catch (NotSupportedException) { rejected = true; }
             Check(rejected, "Changed iterator IL was accepted");
+            SharedBudgetCase(owner);
             harmony.UnpatchSelf();
             Check(HarmonyLib.Harmony.GetPatchInfo(Loading.Step).Owners.Contains(observer.Id), "Batch rollback removed an unrelated observer");
             Check(ForestInstructionBatching.CountedNull > 0, "Null-result accounting never engaged");
@@ -118,4 +121,32 @@ internal static class InstructionBatchingTests
     private static bool Skip() => false;
     private static bool ReadCount(ref uint __0) { __0 = (uint)ReaderUnits.Length; return false; }
     private static bool ReadUnit(object context, ref IInstructionResult __result) { __result = ReaderUnits[readerIndex++].Execute(context); return false; }
+    private static void SharedBudgetCase(object context)
+    {
+        // Compose the new shared wrapper with the REAL native queued iterator,
+        // cap and null-result transpiler; no instruction or result is replaced.
+        double clock = 0; int frame = 0;
+        var budget = new ForestGenerationBudget.Scheduler(() => frame, () => clock, () => 4, () => true);
+        Core.Config.InstructionsPerFrame = 1; Executed.Clear();
+        var sets = Enumerable.Range(0, 3).Select(_ => new InstructionSet()).ToArray();
+        for (int i = 0; i < sets.Length; i++)
+            for (int j = 0; j < 4; j++) sets[i].Add(new Unit(i * 10 + j, true) { Cost = () => clock += 5 });
+        var iterators = sets.Select(set => budget.Wrap((IEnumerator)Loading.Factory.Invoke(set, new[] { context, Task.CompletedTask, (object)10 })!)).ToArray();
+        var finished = new bool[iterators.Length];
+        for (; frame < 30 && finished.Any(value => !value); frame++)
+        {
+            int before = Executed.Count;
+            for (int i = 0; i < iterators.Length; i++) if (!finished[i]) finished[i] = !iterators[i].MoveNext();
+            Check(Executed.Count - before <= 1, "Concurrent native null-result sets bypassed shared budget");
+            if (frame == 2) Check(Executed.Take(3).SequenceEqual(new[] { 0, 10, 20 }), "Native coroutine ordering starved a later forest set");
+        }
+        Check(finished.All(value => value), "Shared-budget native instruction sets did not finish");
+        for (int i = 0; i < sets.Length; i++)
+        {
+            int at = i;
+            Check(Executed.Where(id => id / 10 == at).SequenceEqual(Enumerable.Range(0, 4).Select(j => at * 10 + j)), "Shared wrapper changed native null-result ordering");
+            Check(!sets[i].Results.Any(), "Shared wrapper stored a null native result");
+        }
+        Check(budget.MaximumStepMs == 5 && budget.BudgetDeferrals > 0 && budget.Pending == 0, "Shared-budget native work accounting changed");
+    }
 }

@@ -1,4 +1,4 @@
-# Cave Performance 0.2.1
+# Cave Performance 0.2.5
 
 Server-only MelonLoader mod for A Township Tale. It combines cave performance changes and navigation recovery in one `CavePerformance.dll`.
 
@@ -9,8 +9,8 @@ Server-only MelonLoader mod for A Township Tale. It combines cave performance ch
 - Shares a 4 ms generation target between existing rendering iterator steps, deferring later work after the target is used. Individual native calls remain indivisible.
 - Starts cave scans using a separate nonblocking path-queue lock while workers finish. It yields during that wait and releases only its own extra lock. The scan's own Unity work remains on its native execution path.
 - Separates successful dynamic-load completions so at most one complete saved-entity batch is released per frame for this mod. The queue holds 32 pending gates; overflow continues through the native path. Save/shutdown handling drains pending work.
-- Validates completed cave navigation graphs and retries failed scans up to three attempts, five seconds apart. It clears stale failed wander state and allows up to two delayed retries of the original request.
-- Sets eligible cave wyrm population targets to 75% of their normal value by default, across all cave layers. Balanced rounding lets small groups contribute to the reduction. Existing creatures are retained; native spawning and replenishment follow the adjusted target. Other creatures, mixed/unknown populations, and surface populations retain native behavior.
+- Shares admission between static and generated cave scans, validates navigation completion, and retries failed scans up to three attempts, five seconds apart. It clears stale failed wander state and allows up to two delayed retries of the original request.
+- Defaults eligible Wyrm targets to 75% of their normal value. Regular Turabada targets on generated layers have a separate multiplier. Balanced rounding handles small populations, and existing creatures remain in place.
 - Includes optional bounded timing, cave-step, path-queue, and combat observations. Those components are compiled into the DLL; separate diagnostic mod downloads are unnecessary.
 
 Local searches retain native constraints and use full searches when eligibility checks fail. The loading gates preserve original failures and release complete batches; they do not split entity restoration across frames. A native instruction, scan step, or entity batch can still exceed the generation target.
@@ -26,7 +26,7 @@ With the server stopped, put `CavePerformance.dll` in `Mods`. Remove these repla
 - `PathfindingQueueDiagnostics.dll`
 - `MobCombatDiagnostics.dll`
 
-Start the server normally and check for `[Cave_Performance] READY v0.2.1` and component errors. Loaded standalone copies cause initialization to be refused to prevent duplicate hooks. Clients do not install this DLL. Forest Performance is a separate optional mod.
+Start the server normally and check for `[Cave_Performance] READY v0.2.5` and component errors. Remove the replaced standalone copies before startup to avoid duplicate hooks.
 
 ## Configuration
 
@@ -41,6 +41,7 @@ The first startup creates `UserData/CavePerformance/config.txt`. Settings are re
 | `separate_entity_loads` | `true` | Gate complete entity batches onto later frames |
 | `fine_timing` | `true` | Record bounded detailed timings |
 | `cave_wyrm_multiplier` | `0.75` | Wyrm target multiplier from `0` to `1`; `1` restores the native calculation |
+| `cave_turabada_multiplier` | `1` | Regular generated-layer Turabada multiplier from `0` to `1`. Set `0.75` for a 25% reduction |
 | `navigation_recovery` | `true` | Enable embedded scan/wander recovery |
 | `cave_step_diagnostics` | `true` | Enable embedded cave-step observations |
 | `pathfinding_queue_diagnostics` | `true` | Enable embedded path-queue observations |
@@ -54,7 +55,7 @@ When enabled, recordings are written under `UserData/CavePerformance/`, with emb
 
 ## Build, test, and remove
 
-See the repository [build and test instructions](../README.md). Run `bash CavePerformance/test.sh` from the repository root with `ATT_GAME_PATH` set. The suite uses the sibling Forest Performance source for composition checks and the server's separate `DailyGarbageCollection.dll` for compatibility fixtures.
+See the repository [build and test instructions](../README.md). Run `bash CavePerformance/test.sh` from the repository root with `ATT_GAME_PATH` set. The runner builds Forest Performance and Daily Garbage Collection from this repository for composition checks.
 
 To disable the mod, stop the server normally and remove the DLL or set `enabled=false` before the next startup. No save conversion is performed. Removing a file does not unload a running mod. If restoring the old split stack, restore the previous cave performance DLL and its matching standalone components together.
 

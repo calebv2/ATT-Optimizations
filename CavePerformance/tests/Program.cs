@@ -9,6 +9,8 @@ using System.Runtime.Serialization;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
+using Alta.Chunks;
+using Alta.Inventory;
 using CavePerformance;
 using HarmonyLib;
 using Pathfinding;
@@ -201,13 +203,45 @@ internal static class Program
         var afterSave=Loading.NextFrame(250);Check(!afterSave.IsCompleted,"Instant save scope leaked");Loading.Drain();
         var wrap=Loading.NextFrame(int.MaxValue);Loading.Tick(int.MinValue);Check(wrap.IsCompleted,"Frame counter rollover stranded a load");
         Loading.Frame=()=>300;
-        Check(Loading.RenderBegin(null!,out var render),"Fresh frame rejected generation");Thread.Sleep(6);Loading.RenderEnd(render);
         var owner=(Alta.Caves.GenerationBase)FormatterServices.GetUninitializedObject(typeof(Alta.Caves.GenerationBase));
+        var first=(Alta.Caves.GenerationBase)FormatterServices.GetUninitializedObject(typeof(Alta.Caves.GenerationBase));
+        var work = new List<Alta.Caves.MapChunk> { null! };
+        var idle = new List<Alta.Caves.MapChunk>();
+        Check(Loading.RenderBegin(first,work,out var render),"Fresh frame rejected generation");Thread.Sleep(6);Loading.RenderEnd(render);
         Alta.Caves.GenerationBase.CurrentlyRendering=owner;
-        Check(!Loading.RenderBegin(owner,out render),"Second generator ignored shared frame budget");
+        Check(!Loading.RenderBegin(owner,work,out render),"Second generator ignored shared frame budget");
         Check(ReferenceEquals(Alta.Caves.GenerationBase.CurrentlyRendering,null),"Deferred generator retained scheduler ownership");
-        Loading.Frame=()=>301;Check(Loading.RenderBegin(null!,out render),"New frame did not resume generation");Loading.RenderEnd(render);
+        Loading.Frame=()=>301;
+        Check(Loading.RenderBegin(first,idle,out render) && !render.Active,"An empty layer reserved or consumed generation budget");
+        Check(!Loading.RenderBegin(first,work,out render),"Always-first layer took the deferred layer's turn");
+        Check(Loading.RenderBegin(owner,work,out render) && render.Active,"Deferred cave did not resume next frame");Loading.RenderEnd(render);
+        Loading.ClearRenderQueue();
+        RenderTurns();
         Console.WriteLine("PASS load scheduler: successful native work precedes gate; entity/save/ready continuation waits; one release per distinct frame; exceptions preserved; disabled/cap fallback; shutdown drain; frame-counter rollover. Entity restore itself is atomic.");
+    }
+    private static void RenderTurns()
+    {
+        var queue = new Loading.RenderTurns<object>();
+        var first = new object(); var second = new object(); var scanning = new object();
+        queue.Advance(int.MaxValue);
+        queue.Defer(first, int.MaxValue, false);
+        queue.Defer(second, int.MaxValue, false);
+        queue.Defer(scanning, int.MaxValue, true);
+        Check(!queue.Admit(first, int.MinValue, false), "In-flight scan lost its reservation on frame rollover");
+        queue.Defer(first, int.MinValue, false);
+        Check(!queue.Admit(second, int.MinValue, false), "Later waiter took an in-flight scan's reservation");
+        queue.Defer(second, int.MinValue, false);
+        Check(queue.Admit(scanning, int.MinValue, false) && queue.ScanGranted == 1, "In-flight scan could not resume within shared cap");
+        Check(!queue.Admit(second, int.MinValue + 1, false), "Ordinary waiters lost their FIFO order after scan progress");
+        queue.Defer(second, int.MinValue + 1, false);
+        Check(queue.Admit(second, int.MinValue + 2, false), "A missing owner did not expire before the remaining waiter's turn");
+        queue.Advance(int.MinValue + 3);
+        Check(queue.Pending == 0 && queue.Admit(scanning, int.MinValue + 3, false), "Expired reservations retained absent renderers");
+        for (int i = 0; i < 100; i++) queue.Defer(new object(), int.MinValue + 3, false);
+        Check(queue.Pending == 64, "Render queue exceeded its ownership bound");
+        queue.Clear();
+        Check(queue.Pending == 0 && queue.Admit(first, int.MinValue + 4, false), "Clearing queue retained stale reservations");
+        Console.WriteLine("PASS cave render turns: next-frame ownership, scan priority, frame rollover, FIFO order, missing-owner expiry and bounded retention.");
     }
     private static void Attachments()
     {
@@ -218,10 +252,45 @@ internal static class Program
             other.Patch(Loading.Render,postfix:new HarmonyMethod(typeof(Program),nameof(Observer)));
             Core.Attach(h);
             Check(HarmonyLib.Harmony.GetAllPatchedMethods().Count(m=>HarmonyLib.Harmony.GetPatchInfo(m).Owners.Contains(h.Id))>=16,"Required hooks missing");
+            PersonalCleanupDrain(h);
             h.UnpatchSelf();Check(HarmonyLib.Harmony.GetPatchInfo(Loading.Render).Owners.Contains(other.Id),"Rollback removed unrelated patch owner");
             Console.WriteLine("PASS actual installed method attachment: worker initialization, scan lifecycle, cave wander/submit/reset, both path preparations, nearest graph filtering/fallback, generation cap, dynamic-load task, entity context, transition and coroutine timing; independent-owner rollback.");
         }
         finally{h.UnpatchSelf();other.UnpatchSelf();}
+    }
+    private static void PersonalCleanupDrain(HarmonyLib.Harmony harmony)
+    {
+        var cleanup = typeof(PersonalChunk).GetMethod("RemoveCurrentPlayer", Instance)!;
+        Check(HarmonyLib.Harmony.GetPatchInfo(cleanup)?.Owners.Contains(harmony.Id) == true, "Cave personal-cleanup hook did not attach");
+        var chunk = (Chunk)FormatterServices.GetUninitializedObject(typeof(Chunk));
+        var manager = FormatterServices.GetUninitializedObject(typeof(ServerChunkContentManager));
+        typeof(Chunk).GetField("<ContentManager>k__BackingField", Instance)!.SetValue(chunk, manager);
+        var personal = (PersonalChunk)FormatterServices.GetUninitializedObject(typeof(PersonalChunk));
+        typeof(PersonalChunk).GetField("chunk", Instance)!.SetValue(personal, chunk);
+        var pending = Loading.NextFrame(400);
+        long bypasses = Loading.PersonalCleanupBypasses;
+        Loading.PersonalCleanupBegin(personal, out var outer);
+        try
+        {
+            Loading.ForcedBegin(chunk, out var bypass);
+            Loading.SaveEnd(bypass);
+            Check(!bypass && !pending.IsCompleted && Loading.PersonalCleanupBypasses == bypasses + 1, "Personal cleanup flushed unrelated cave work");
+            Loading.Tick(401);
+            Check(pending.IsCompleted, "Unrelated cave work lost its ordinary release after personal cleanup");
+            pending = Loading.NextFrame(401);
+            Action<Chunk> subscriber = _ => { };
+            chunk.BeganUnloading += subscriber;
+            Loading.ForcedBegin(chunk, out var fallback);
+            Loading.SaveEnd(fallback);
+            Check(fallback && pending.IsCompleted, "Unload subscriber bypassed the synchronous cave drain");
+            chunk.BeganUnloading -= subscriber;
+        }
+        finally { Loading.PersonalCleanupEnd(outer); }
+        pending = Loading.NextFrame(402);
+        Loading.ForcedBegin(chunk, out var ordinary);
+        Loading.SaveEnd(ordinary);
+        Check(ordinary && pending.IsCompleted, "Personal cleanup scope leaked into later forced save");
+        Console.WriteLine("PASS cave personal unload pacing: normal gate release preserved, attached exact stock cleanup, subscriber fallback and later forced drain.");
     }
     private static void Observer() { }
     private static void ExistingMods()
@@ -231,6 +300,8 @@ internal static class Program
         var root=typeof(AstarPath).Assembly;
         Assembly Mod(string file) => file == "ForestNavigationGuard"
             ? Assembly.LoadFrom(Environment.GetEnvironmentVariable("ATT_FOREST_PERFORMANCE_DLL")!)
+            : file == "DailyGarbageCollection"
+                ? Assembly.LoadFrom(Environment.GetEnvironmentVariable("ATT_DAILY_GC_DLL")!)
             : new[] { "CaveNavigationRecovery", "CaveStepDiagnostics", "PathfindingQueueDiagnostics", "MobCombatDiagnostics" }.Contains(file)
                 ? typeof(Core).Assembly : Assembly.LoadFrom(Path.Combine(game,"Mods",file+".dll"));
         void Invoke(Type type,string name,params object[] args)=>type.GetMethod(name,Static)!.Invoke(null,args);
@@ -263,12 +334,29 @@ internal static class Program
             object targets=step.GetField("Targets",Static)!.GetValue(null)!;targets.GetType().GetMethod("Clear")!.Invoke(targets,null);
             Invoke(step,"AttachAll",root,h,Path.Combine(temp,"steps.csv"));
             Invoke(mob,"Validate"); Invoke(mob,"Attach",h,Path.Combine(temp,"combat.csv"));
+            // Steady deliberately leaves this broader nearest-node prefix on
+            // alongside ours. Exercise its actual installed code in both patch
+            // orders, including our graph-index>31 scope and fallback probes.
+            string steadyFile=Path.Combine(game,"Mods","Steady.dll");
+            if(File.Exists(steadyFile))
+            {
+                var nearest=Assembly.LoadFrom(steadyFile).GetType("Steady.Fixes.NearestNode",true)!;
+                h.Patch(Search.Nearest,prefix:new HarmonyMethod(nearest,"GetNearest"){priority=HarmonyLib.Priority.Last});
+            }
         }
         void Probe()
         {
             var astar=Astar();var world=Graph(0,0);var own=Graph(100,-1500);astar.data.graphs=Slots(world,own);AstarPath.active=astar;
             var p=PathFor(42,new Vector3(0,-1500,0));Search.MarkScanned(own);Search.BindPath(p,new Search.Binding{DirectGraph=own});
             Search.ConstantPrepare.Invoke(p,null);Check(p.startNode==own.Node&&world.Calls==0,"Other installed hooks changed local selection");
+            var saved=own.Node; own.Node=null; world.Calls=0;
+            Search.PrepareBegin(p,out var scope);
+            try
+            {
+                var fallback=astar.GetNearest(p.originalStartPoint,p.nnConstraint,null);
+                Check(fallback.node==world.Node&&world.Calls>0,"Installed hooks suppressed native fallback when the local graph had no usable node");
+            }
+            finally { Search.PrepareEnd(scope,null); own.Node=saved; }
         }
         try
         {
@@ -286,7 +374,7 @@ internal static class Program
                 }
                 finally{ours.UnpatchSelf();other.UnpatchSelf();AstarPath.active=null;}
             }
-            Console.WriteLine("PASS installed-mod composition in both attachment orders: consolidated cave recovery/steps/queue components, DailyGarbageCollection scan transpiler/timer guard, Forest Performance graph/tile components; local graph choice and independent rollback preserved.");
+            Console.WriteLine("PASS installed-mod composition in both attachment orders: cave recovery/steps/queue, DailyGC scan/timer, Forest graph/tile and installed Steady nearest-node prefix; local graph choice, native fallback and independent rollback preserved.");
         }
         finally{Directory.Delete(temp,true);}
     }
@@ -337,7 +425,7 @@ internal static class Program
     private static void Main()
     {
         Core.MainThread=Thread.CurrentThread.ManagedThreadId;Core.Config=new Settings();Core.Bind();Core.Ready=true;
-        SettingsTests();SearchTests();LoadingTests();Attachments();ExistingMods();TimingTests();WyrmTests.Run();SearchBindingTests.Run();ScanPacingTests.Run();GateContextTests.Run();ConsolidationTests.Run();
+        SettingsTests();SearchTests();LoadingTests();Attachments();ExistingMods();TimingTests();WyrmTests.Run();SearchBindingTests.Run();ScanPacingTests.Run();GateContextTests.Run();LoadTransitionTimingTests.Run();ConsolidationTests.Run();
         Core.Ready=false;
         Console.WriteLine("LIMIT: host fixtures do not execute live Unity scene loading, networking, mesh cutting or player movement; startup deployment still requires live validation at a normal restart.");
     }

@@ -33,10 +33,11 @@ internal static class Program
             throw new Exception("Combined DLL requires replaced DLLs");
         Settings defaults = Settings.Parse(Settings.Defaults);
         Settings off = Settings.Parse("enabled=false\nnavigation_fixes=false\nreset_fixes=false\nforest_step_diagnostics=false");
-        if (!defaults.Enabled || !defaults.Navigation || !defaults.Reset || !defaults.Diagnostics ||
-            off.Enabled || off.Navigation || off.Reset || off.Diagnostics)
+        if (!defaults.Enabled || !defaults.Navigation || !defaults.Reset || !defaults.Diagnostics || defaults.GenerationBudgetMs != 4 ||
+            off.Enabled || off.Navigation || off.Reset || off.Diagnostics || defaults.OutsideConnectivityProof || off.OutsideConnectivityProof ||
+            !Settings.Parse("connectivity_outside_proof=true").OutsideConnectivityProof)
             throw new Exception("Forest startup controls changed or ignored");
-        foreach (string source in new[] { "enabled=maybe", "unknown=true", "enabled=true=extra", "forest_instructions_per_frame=-1", "forest_instructions_per_frame=11" })
+        foreach (string source in new[] { "enabled=maybe", "unknown=true", "enabled=true=extra", "connectivity_outside_proof=maybe", "forest_instructions_per_frame=-1", "forest_instructions_per_frame=11", "forest_generation_budget_ms=-1", "forest_generation_budget_ms=NaN", "forest_generation_budget_ms=Infinity", "forest_generation_budget_ms=51" })
         {
             bool rejected = false;
             try { Settings.Parse(source); } catch (FormatException) { rejected = true; }
@@ -46,9 +47,13 @@ internal static class Program
         // This validates game metadata without running a reset or Unity scenes.
         ForestResetFix.Core.ValidatePatchAttachment();
         LoadingTests.Run();
+        GenerationBudgetTests.Run();
+        TransitionTimingTests.Run();
         GateContextTests.Run();
         InstructionBatchingTests.Run();
         ConnectivityTests.Run();
+        RewriteTerrainTests.Run();
+        PrefabCleanupTests.Run();
         var calls = new List<string>(); var group = new ModuleGroup();
         group.Start(new Fixture("a", calls), null!, "family-root");
         group.Start(new Fixture("b", calls), null!, "family-root");

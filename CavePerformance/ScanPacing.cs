@@ -21,12 +21,14 @@ namespace CavePerformance
             IDisposable Acquire();
         }
         private const BindingFlags Flags = BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
-        private static FieldInfo processorField = null!, queueField = null!, threadsField = null!;
+        private static FieldInfo processorField = null!, queueField = null!, threadsField = null!, workItemLock = null!;
         private static PropertyInfo allBlocked = null!, terminating = null!;
         private static MethodInfo scanFactory = null!;
         private static readonly HashSet<Warmup> Pending = new HashSet<Warmup>();
         internal static long Started, Yielded, HandedOff, Timeouts, Cancelled, NativeFallbacks;
-        private static long waitMilliseconds;
+        internal static long GraphWorkYields, GraphWorkTimeouts;
+        private static long waitMilliseconds, graphWorkWaitMilliseconds;
+        private const double MaxGraphWorkWaitMs = 1000;
         internal static int PendingCount => Pending.Count;
         internal static void Bind()
         {
@@ -34,6 +36,7 @@ namespace CavePerformance
             processorField = typeof(AstarPath).GetField("pathProcessor", Flags) ?? throw new MissingFieldException("AstarPath.pathProcessor");
             queueField = typeof(PathProcessor).GetField("queue", Flags) ?? throw new MissingFieldException("PathProcessor.queue");
             threadsField = typeof(PathProcessor).GetField("threads", Flags) ?? throw new MissingFieldException("PathProcessor.threads");
+            workItemLock = typeof(AstarPath).GetField("workItemLock", Flags) ?? throw new MissingFieldException("AstarPath.workItemLock");
             allBlocked = queueField.FieldType.GetProperty("AllReceiversBlocked", Flags) ?? throw new MissingMemberException("ThreadControlQueue.AllReceiversBlocked");
             terminating = queueField.FieldType.GetProperty("IsTerminating", Flags) ?? throw new MissingMemberException("ThreadControlQueue.IsTerminating");
             scanFactory = typeof(AstarPath).GetMethod("ScanAsync", Flags, null, new[] { typeof(NavGraph[]) }, null) ?? throw new MissingMethodException("AstarPath.ScanAsync");
@@ -41,6 +44,7 @@ namespace CavePerformance
             var release = typeof(PathProcessor.GraphUpdateLock).GetMethod("Release", Flags, null, Type.EmptyTypes, null);
             var held = typeof(PathProcessor.GraphUpdateLock).GetProperty("Held", Flags);
             if (processorField.FieldType != typeof(PathProcessor) || threadsField.FieldType != typeof(Thread[]) ||
+                workItemLock.IsStatic || workItemLock.FieldType != typeof(PathProcessor.GraphUpdateLock) ||
                 allBlocked.PropertyType != typeof(bool) || terminating.PropertyType != typeof(bool) ||
                 scanFactory.ReturnType != typeof(IEnumerable<Progress>) || scanFactory.GetMethodBody() == null ||
                 pause?.ReturnType != typeof(PathProcessor.GraphUpdateLock) || pause.GetMethodBody() == null ||
@@ -73,6 +77,44 @@ namespace CavePerformance
             public bool Ready => !astar.isScanning && (bool)allBlocked.GetValue(queue, null);
             public double Now => Core.Now;
             public IDisposable Acquire() => new NativeLease(processor.PausePathfinding(false));
+        }
+        internal static bool HasGraphWork(AstarPath astar) => ((PathProcessor.GraphUpdateLock)workItemLock.GetValue(astar)).Held ||
+            astar.IsAnyGraphUpdateQueued || astar.IsAnyGraphUpdateInProgress || astar.IsAnyWorkItemInProgress;
+        internal static Func<bool>? BeforeGraphRegistration()
+        {
+            if (!Core.Ready || !Core.Main || !Core.Config.AsyncScanStart || ReferenceEquals(AstarPath.active, null)) return null;
+            var astar = AstarPath.active;
+            var preflight = new GraphPreflight();
+            return () => Core.Ready && Core.Main && ReferenceEquals(AstarPath.active, astar) && preflight.Defer(HasGraphWork(astar), Core.Now);
+        }
+        internal sealed class GraphPreflight
+        {
+            private double started = -1;
+            internal bool Defer(bool existingWork, double now)
+            {
+                // A* advances async work items only outside scans and later
+                // force-flushes pending work inside a scan. Yield before even
+                // registering a cave graph, so existing work cannot see a
+                // graph reserved to a scan that has not yet generated tiles.
+                if (existingWork)
+                {
+                    if (started < 0) started = now;
+                    if (now - started < MaxGraphWorkWaitMs)
+                    {
+                        Interlocked.Increment(ref GraphWorkYields);
+                        return true;
+                    }
+                }
+                if (started >= 0)
+                {
+                    if (existingWork) Interlocked.Increment(ref GraphWorkTimeouts);
+                    double elapsed = now - started;
+                    Interlocked.Add(ref graphWorkWaitMilliseconds, (long)Math.Max(0, elapsed));
+                    Core.Row("scan_wait_existing_graph_work", elapsed, "pause_held=false;new_graph_registered=false;deadline_reached=" + existingWork);
+                    started = -1;
+                }
+                return false;
+            }
         }
         internal sealed class NativeLease : IDisposable
         {
@@ -219,6 +261,8 @@ namespace CavePerformance
         internal static string Health() => ";scan_warmups=" + Interlocked.Read(ref Started) + ";scan_warmup_yields=" + Interlocked.Read(ref Yielded) +
             ";scan_warmup_handoffs=" + Interlocked.Read(ref HandedOff) + ";scan_warmup_timeouts=" + Interlocked.Read(ref Timeouts) +
             ";scan_warmup_cancelled=" + Interlocked.Read(ref Cancelled) + ";scan_warmup_native_fallbacks=" + Interlocked.Read(ref NativeFallbacks) +
-            ";scan_warmup_pending=" + Pending.Count + ";scan_warmup_wait_ms=" + Interlocked.Read(ref waitMilliseconds);
+            ";scan_warmup_pending=" + Pending.Count + ";scan_warmup_wait_ms=" + Interlocked.Read(ref waitMilliseconds) +
+            ";scan_existing_graph_work_yields=" + Interlocked.Read(ref GraphWorkYields) + ";scan_existing_graph_work_timeouts=" + Interlocked.Read(ref GraphWorkTimeouts) +
+            ";scan_existing_graph_work_wait_ms=" + Interlocked.Read(ref graphWorkWaitMilliseconds);
     }
 }

@@ -5,8 +5,12 @@ namespace ForestPerformance
     internal sealed class Settings
     {
         internal bool Enabled = true, Navigation = true, Reset = true, Diagnostics = true, Connectivity = true, SeparateLoads = true;
+        internal bool OutsideConnectivityProof;
+        internal bool RewriteTerrainMasks = true;
+        internal bool PopulationRestorePrewarm = true;
         internal int InstructionsPerFrame = 1;
-        internal const string Defaults = "# Forest Performance 0.2.0; startup settings.\nenabled=true\nnavigation_fixes=true\nreset_fixes=true\nforest_step_diagnostics=true\nconnectivity_updates=true\nforest_instructions_per_frame=1\nseparate_entity_loads=true\n";
+        internal double GenerationBudgetMs = 4;
+        internal const string Defaults = "# Forest Performance 0.2.7 startup settings.\nenabled=true\nnavigation_fixes=true\nreset_fixes=true\nforest_step_diagnostics=true\nconnectivity_updates=true\nconnectivity_outside_proof=false\nforest_instructions_per_frame=1\nforest_generation_budget_ms=4\nseparate_entity_loads=true\nrewrite_terrain_masks=true\npopulation_restore_prewarm=true\n";
         internal static Settings Parse(string source)
         {
             var value = new Settings();
@@ -23,12 +27,18 @@ namespace ForestPerformance
                     case "reset_fixes": value.Reset = bool.Parse(pair[1].Trim()); break;
                     case "forest_step_diagnostics": value.Diagnostics = bool.Parse(pair[1].Trim()); break;
                     case "connectivity_updates": value.Connectivity = bool.Parse(pair[1].Trim()); break;
+                    case "connectivity_outside_proof": value.OutsideConnectivityProof = bool.Parse(pair[1].Trim()); break;
                     case "forest_instructions_per_frame": value.InstructionsPerFrame = int.Parse(pair[1].Trim(), System.Globalization.CultureInfo.InvariantCulture); break;
+                    case "forest_generation_budget_ms": value.GenerationBudgetMs = double.Parse(pair[1].Trim(), System.Globalization.CultureInfo.InvariantCulture); break;
                     case "separate_entity_loads": value.SeparateLoads = bool.Parse(pair[1].Trim()); break;
+                    case "rewrite_terrain_masks": value.RewriteTerrainMasks = bool.Parse(pair[1].Trim()); break;
+                    case "population_restore_prewarm": value.PopulationRestorePrewarm = bool.Parse(pair[1].Trim()); break;
                     default: throw new FormatException("Unknown setting: " + pair[0]);
                 }
             }
             if (value.InstructionsPerFrame < 0 || value.InstructionsPerFrame > 10) throw new FormatException("forest_instructions_per_frame must be 0 (native) through 10");
+            if (double.IsNaN(value.GenerationBudgetMs) || double.IsInfinity(value.GenerationBudgetMs) || value.GenerationBudgetMs < 0 || value.GenerationBudgetMs > 50)
+                throw new FormatException("forest_generation_budget_ms must be 0 (off) through 50");
             return value;
         }
     }
